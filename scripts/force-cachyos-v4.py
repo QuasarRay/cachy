@@ -26,7 +26,10 @@ while i < len(lines):
         while i < len(lines) and not lines[i].lstrip().startswith("["):
             i += 1
         continue
-    out.append(lines[i])
+    line = lines[i]
+    if line.strip().startswith("Architecture"):
+        line = "Architecture = x86_64 x86_64_v4"
+    out.append(line)
     i += 1
 
 insert = [
