@@ -1,0 +1,134 @@
+# Packages intentionally installed by the custom CachyOS LXQt ISO.
+# Keep one pacman package/group per line. External vendor artifacts live in
+# manifests/external-artifacts.yml and are not resolved by pacman here.
+
+# CachyOS complete recommended gaming ecosystem
+cachyos-gaming-meta
+cachyos-gaming-applications
+steam
+proton-cachyos-slr
+wine-cachyos-opt
+umu-launcher
+protontricks
+winetricks
+gamemode
+lib32-gamemode
+gamescope
+goverlay
+heroic-games-launcher
+faugus-launcher
+lutris
+mangohud
+lib32-mangohud
+vkbasalt
+lib32-vkbasalt
+vulkan-tools
+
+# Generic VPN / censorship-resilience / proxy tooling
+wireguard-tools
+openvpn
+openconnect
+networkmanager-openconnect
+proxychains-ng
+dnscrypt-proxy
+tor
+torsocks
+nyx
+python-stem
+sing-box
+xray
+
+# Network diagnostics and recovery
+tcpdump
+wireshark-qt
+nmap
+mtr
+traceroute
+iperf3
+socat
+gnu-netcat
+aria2
+whois
+inetutils
+jq
+yq
+
+# Containers
+docker
+docker-buildx
+docker-compose
+containerd
+runc
+podman
+distrobox
+
+# Virtualization / hypervisor stack
+qemu-full
+libvirt
+virt-manager
+edk2-ovmf
+swtpm
+virtiofsd
+dnsmasq
+
+# C / C++ / native development
+gcc
+clang
+llvm
+lld
+cmake
+ninja
+meson
+pkgconf
+ccache
+gdb
+lldb
+valgrind
+strace
+perf
+git-lfs
+github-cli
+shellcheck
+shfmt
+
+# Rust development - actual compiler/toolchain is present offline
+rust
+rust-src
+rust-analyzer
+
+# Go development
+go
+gopls
+delve
+
+# Java development
+jdk-openjdk
+maven
+gradle
+
+# Python development
+python
+python-pip
+python-pipx
+python-virtualenv
+ipython
+python-pytest
+python-hypothesis
+
+# Vulkan / shader development
+vulkan-headers
+vulkan-validation-layers
+vulkan-icd-loader
+lib32-vulkan-icd-loader
+glslang
+shaderc
+spirv-tools
+spirv-headers
+
+# Shell / CLI environment
+xonsh
+starship
+
+# Office / productivity
+libreoffice-fresh
+hunspell-en_us
