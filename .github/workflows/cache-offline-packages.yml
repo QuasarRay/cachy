@@ -48,8 +48,12 @@ jobs:
             https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-v4-mirrorlist-27-1-any.pkg.tar.zst
 
           python scripts/force-cachyos-v4.py /etc/pacman.conf
+          # CachyOS's live installer enables multilib; it is required by Steam,
+          # Wine and the 32-bit NVIDIA/Vulkan packages in the offline closure.
+          sed -i '/^#\[multilib\]$/,+1 s/^#//' /etc/pacman.conf
           grep -A1 -E '^\[cachyos-(v4|core-v4|extra-v4)\]$' /etc/pacman.conf
           grep -A1 -E '^\[cachyos\]$' /etc/pacman.conf
+          grep -A1 -E '^\[multilib\]$' /etc/pacman.conf
           test -f /etc/pacman.d/cachyos-v4-mirrorlist
           pacman -Syy --noconfirm
 
