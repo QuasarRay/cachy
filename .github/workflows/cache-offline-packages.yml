@@ -40,7 +40,7 @@ jobs:
           cd /tmp/cachyos-repo
           yes | ./cachyos-repo.sh
           cd "$GITHUB_WORKSPACE"
-          python scripts/force-cachyos-v3.py /etc/pacman.conf
+          python scripts/force-cachyos-v4.py /etc/pacman.conf
           pacman -Syy --noconfirm
 
       - name: Derive current installer package manifest
@@ -56,9 +56,9 @@ jobs:
           path: |
             .cache/pacman/pkg
             .cache/pacman/db
-          key: cachyos-lxqt-v3-${{ hashFiles('out/source-manifest.json', 'out/top-level-packages.txt') }}
+          key: cachyos-lxqt-v4-${{ hashFiles('out/source-manifest.json', 'out/top-level-packages.txt') }}
           restore-keys: |
-            cachyos-lxqt-v3-
+            cachyos-lxqt-v4-
 
       - name: Resolve full dependency closure against an empty target database
         shell: bash
@@ -110,12 +110,12 @@ jobs:
           path: |
             .cache/pacman/pkg
             .cache/pacman/db
-          key: cachyos-lxqt-v3-${{ hashFiles('out/source-manifest.json', 'out/top-level-packages.txt') }}
+          key: cachyos-lxqt-v4-${{ hashFiles('out/source-manifest.json', 'out/top-level-packages.txt') }}
 
       - name: Upload review manifests only
         uses: actions/upload-artifact@v4
         with:
-          name: cachyos-lxqt-package-manifests
+          name: cachyos-lxqt-package-manifests-v4
           path: out/
           if-no-files-found: error
           retention-days: 14
