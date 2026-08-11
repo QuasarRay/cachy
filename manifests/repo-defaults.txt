@@ -20,11 +20,9 @@ faugus-launcher
 lutris
 mangohud
 lib32-mangohud
-vkbasalt
-lib32-vkbasalt
 vulkan-tools
 
-# Generic VPN / censorship-resilience / proxy tooling
+# Generic VPN / censorship-resilience / proxy tooling available in repositories
 wireguard-tools
 openvpn
 openconnect
@@ -35,8 +33,6 @@ tor
 torsocks
 nyx
 python-stem
-sing-box
-xray
 
 # Network diagnostics and recovery
 tcpdump
@@ -46,7 +42,7 @@ mtr
 traceroute
 iperf3
 socat
-gnu-netcat
+openbsd-netcat
 aria2
 whois
 inetutils
