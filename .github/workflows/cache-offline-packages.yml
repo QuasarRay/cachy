@@ -1,0 +1,121 @@
+name: Cache CachyOS LXQt offline packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cache-offline-packages.yml'
+      - 'manifests/**'
+      - 'scripts/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CACHE_DIR: ${{ github.workspace }}/.cache/pacman/pkg
+  DB_DIR: ${{ github.workspace }}/.cache/pacman/db
+
+jobs:
+  cache-packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Check out workspace
+        uses: actions/checkout@v4
+
+      - name: Bootstrap Arch tools and CachyOS repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed curl tar python python-yaml git sudo
+          curl --fail --location --retry 5 \
+            https://mirror.cachyos.org/cachyos-repo.tar.xz \
+            -o /tmp/cachyos-repo.tar.xz
+          mkdir -p /tmp/cachyos-repo
+          tar -xf /tmp/cachyos-repo.tar.xz -C /tmp/cachyos-repo
+          cd /tmp/cachyos-repo
+          yes | ./cachyos-repo.sh
+          cd "$GITHUB_WORKSPACE"
+          python scripts/force-cachyos-v3.py /etc/pacman.conf
+          pacman -Syy --noconfirm
+
+      - name: Derive current installer package manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/collect-installer-packages.py
+          echo "Top-level package/group entries: $(wc -l < out/top-level-packages.txt)"
+
+      - name: Restore matching package cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/pacman/pkg
+            .cache/pacman/db
+          key: cachyos-lxqt-v3-${{ hashFiles('out/source-manifest.json', 'out/top-level-packages.txt') }}
+          restore-keys: |
+            cachyos-lxqt-v3-
+
+      - name: Resolve full dependency closure against an empty target database
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$CACHE_DIR" "$DB_DIR/local" "$DB_DIR/sync"
+          pacman -Sy --noconfirm --dbpath "$DB_DIR"
+          mapfile -t packages < out/top-level-packages.txt
+          pacman -Sp --noconfirm --dbpath "$DB_DIR" \
+            --print-format '%n\t%v\t%r\t%s\t%l' \
+            "${packages[@]}" | sort -u > out/resolved-packages.tsv
+          echo "Resolved package records: $(wc -l < out/resolved-packages.tsv)"
+
+      - name: Download complete package closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t packages < out/top-level-packages.txt
+          pacman -Sw --noconfirm --dbpath "$DB_DIR" \
+            --cachedir "$CACHE_DIR" \
+            "${packages[@]}"
+
+      - name: Build local offline repository metadata and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          package_files=("$CACHE_DIR"/*.pkg.tar.zst)
+          if (( ${#package_files[@]} == 0 )); then
+            echo 'No package payloads were downloaded' >&2
+            exit 1
+          fi
+          rm -f "$CACHE_DIR"/cachyos-lxqt-offline.db* \
+                "$CACHE_DIR"/cachyos-lxqt-offline.files*
+          repo-add "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst" "${package_files[@]}"
+          (
+            cd "$CACHE_DIR"
+            sha256sum -- *.pkg.tar.zst | sort -k2 > SHA256SUMS
+          )
+          {
+            echo "package_files=${#package_files[@]}"
+            echo "cache_bytes=$(du -sb "$CACHE_DIR" | cut -f1)"
+            echo "cache_human=$(du -sh "$CACHE_DIR" | cut -f1)"
+          } | tee out/cache-summary.txt
+
+      - name: Save package cache for later ISO job
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .cache/pacman/pkg
+            .cache/pacman/db
+          key: cachyos-lxqt-v3-${{ hashFiles('out/source-manifest.json', 'out/top-level-packages.txt') }}
+
+      - name: Upload review manifests only
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-lxqt-package-manifests
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
