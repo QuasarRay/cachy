@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build the reviewable CachyOS LXQt top-level package manifest.
+"""Build the CachyOS LXQt offline-install top-level package manifest.
 
-The authoritative installer inputs are fetched from CachyOS's current
-`cachyos` branch. Package payloads are not downloaded by this script.
+The authoritative CachyOS installer inputs are fetched from the current
+`cachyos` branch. Local manifests add the machine/recovery and user-approved
+workstation packages that Calamares must be able to install without network.
 """
 
 from __future__ import annotations
@@ -32,6 +33,11 @@ SELECTED_GROUPS = {
     "Firefox and language package",
 }
 
+LOCAL_MANIFESTS = (
+    Path("manifests/offline-extras.txt"),
+    Path("manifests/repo-defaults.txt"),
+)
+
 
 def fetch(url: str) -> bytes:
     with urlopen(url, timeout=60) as response:
@@ -41,19 +47,15 @@ def fetch(url: str) -> bytes:
 def collect_node(node: dict, out: list[str]) -> None:
     for package in node.get("packages", []) or []:
         package = str(package).strip()
-        # Calamares substitutes variables such as $LOCALE at install time.
-        # Hardware/build-specific concrete replacements live in offline-extras.
         if package and "$" not in package:
             out.append(package)
 
     for subgroup in node.get("subgroups", []) or []:
-        # Subgroups explicitly disabled by default are optional and are not part
-        # of the baseline cache. Selected/default subgroups are included.
         if subgroup.get("selected", True):
             collect_node(subgroup, out)
 
 
-def read_extras(path: Path) -> list[str]:
+def read_manifest(path: Path) -> list[str]:
     packages: list[str] = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.split("#", 1)[0].strip()
@@ -84,9 +86,12 @@ def main() -> None:
     if missing:
         raise SystemExit(f"Expected installer groups not found: {sorted(missing)}")
 
-    packages.extend(read_extras(Path("manifests/offline-extras.txt")))
+    local_hashes: dict[str, str] = {}
+    for manifest in LOCAL_MANIFESTS:
+        raw = manifest.read_bytes()
+        packages.extend(read_manifest(manifest))
+        local_hashes[str(manifest)] = hashlib.sha256(raw).hexdigest()
 
-    # Stable order makes reviews and cache keys deterministic.
     unique = sorted(dict.fromkeys(packages), key=str.casefold)
     Path("out/top-level-packages.txt").write_text(
         "\n".join(unique) + "\n", encoding="utf-8"
@@ -98,6 +103,7 @@ def main() -> None:
         "netinstall_url": NETINSTALL_URL,
         "netinstall_sha256": hashlib.sha256(netinstall_raw).hexdigest(),
         "selected_groups": sorted(SELECTED_GROUPS),
+        "local_manifests": local_hashes,
         "top_level_package_count": len(unique),
     }
     Path("out/source-manifest.json").write_text(
