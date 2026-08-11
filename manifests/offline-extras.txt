@@ -1,0 +1,67 @@
+# Dynamic installer / hardware / recovery packages that are not fully represented
+# by the static LXQt netinstall group. One package or pacman group per line.
+
+# CPU microcode: cache both so final install can choose locally.
+amd-ucode
+intel-ucode
+
+# All boot managers currently supported by CachyOS installer.
+grub
+grub-hook
+cachyos-grub-theme
+os-prober
+limine
+limine-entry-tool
+refind
+systemd-boot-manager
+
+# Btrfs recovery integrations for the supported boot managers.
+snapper
+btrfs-assistant
+limine-snapper-sync
+grub-btrfs-support
+refind-btrfs
+
+# NVIDIA current open-driver profile plus PRIME laptop support.
+nvidia-utils
+egl-wayland
+nvidia-settings
+opencl-nvidia
+lib32-opencl-nvidia
+lib32-nvidia-utils
+libva-nvidia-driver
+vulkan-icd-loader
+lib32-vulkan-icd-loader
+nvidia-prime
+switcheroo-control
+linux-cachyos-nvidia-open
+linux-cachyos-lts-nvidia-open
+nvidia-open-dkms
+
+# Cache both likely hybrid-iGPU families so hardware detection remains offline.
+mesa
+lib32-mesa
+vulkan-intel
+lib32-vulkan-intel
+gst-plugin-va
+linux-firmware-intel
+intel-media-driver
+libva-intel-driver-irql
+intel-media-sdk
+vpl-gpu-rt
+vulkan-radeon
+lib32-vulkan-radeon
+xf86-video-amdgpu
+linux-firmware-amdgpu
+
+# LXQt session diversity / recovery extras. Official LXQt selection remains intact;
+# these provide a lightweight Wayland path and XWayland compatibility.
+labwc
+xorg-xwayland
+xdg-desktop-portal
+xdg-desktop-portal-wlr
+wayland-protocols
+
+# English Firefox locale for the current intended install; Firefox itself comes
+# from the installer-selected package group.
+firefox-i18n-en-us
