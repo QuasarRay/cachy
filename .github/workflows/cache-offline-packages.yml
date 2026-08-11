@@ -35,12 +35,15 @@ jobs:
           curl --fail --location --retry 5 \
             https://mirror.cachyos.org/cachyos-repo.tar.xz \
             -o /tmp/cachyos-repo.tar.xz
-          mkdir -p /tmp/cachyos-repo
-          tar -xf /tmp/cachyos-repo.tar.xz -C /tmp/cachyos-repo
+          rm -rf /tmp/cachyos-repo
+          tar -xf /tmp/cachyos-repo.tar.xz -C /tmp
+          test -x /tmp/cachyos-repo/cachyos-repo.sh
           cd /tmp/cachyos-repo
           yes | ./cachyos-repo.sh
           cd "$GITHUB_WORKSPACE"
           python scripts/force-cachyos-v4.py /etc/pacman.conf
+          grep -A1 -E '^\[cachyos-(v4|core-v4|extra-v4)\]$' /etc/pacman.conf
+          test -f /etc/pacman.d/cachyos-v4-mirrorlist
           pacman -Syy --noconfirm
 
       - name: Derive current installer package manifest
