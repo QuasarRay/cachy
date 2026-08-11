@@ -32,6 +32,8 @@ jobs:
         run: |
           set -euo pipefail
           pacman -Syu --noconfirm --needed curl tar python python-yaml git sudo
+          pacman-key --init
+          pacman-key --populate archlinux
           curl --fail --location --retry 5 \
             https://mirror.cachyos.org/cachyos-repo.tar.xz \
             -o /tmp/cachyos-repo.tar.xz
