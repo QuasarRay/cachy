@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 env:
-  CACHE_DIR: ${{ github.workspace }}/.cache/pacman/pkg
-  DB_DIR: ${{ github.workspace }}/.cache/pacman/db
+  CACHE_DIR: .cache/pacman/pkg
+  DB_DIR: .cache/pacman/db
 
 jobs:
   cache-packages:
