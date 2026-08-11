@@ -27,24 +27,29 @@ jobs:
       - name: Check out workspace
         uses: actions/checkout@v4
 
-      - name: Bootstrap Arch tools and CachyOS repositories
+      - name: Bootstrap Arch tools and CachyOS v4 repositories
         shell: bash
         run: |
           set -euo pipefail
-          pacman -Syu --noconfirm --needed curl tar python python-yaml git sudo
+          pacman -Syu --noconfirm --needed curl python python-yaml git sudo
           pacman-key --init
           pacman-key --populate archlinux
-          curl --fail --location --retry 5 \
-            https://mirror.cachyos.org/cachyos-repo.tar.xz \
-            -o /tmp/cachyos-repo.tar.xz
-          rm -rf /tmp/cachyos-repo
-          tar -xf /tmp/cachyos-repo.tar.xz -C /tmp
-          test -x /tmp/cachyos-repo/cachyos-repo.sh
-          cd /tmp/cachyos-repo
-          yes | ./cachyos-repo.sh
-          cd "$GITHUB_WORKSPACE"
+          pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
+          pacman-key --lsign-key F3B607488DB35A47
+
+          # These are the current bootstrap packages documented by CachyOS.
+          # We deliberately do not install the CachyOS pacman fork here: the
+          # stock Arch pacman is enough to resolve/download the ISO package set,
+          # and avoids host-runner CPU auto-detection and container hook issues.
+          pacman -U --noconfirm \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-27-1-any.pkg.tar.zst \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-v3-mirrorlist-27-1-any.pkg.tar.zst \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-v4-mirrorlist-27-1-any.pkg.tar.zst
+
           python scripts/force-cachyos-v4.py /etc/pacman.conf
           grep -A1 -E '^\[cachyos-(v4|core-v4|extra-v4)\]$' /etc/pacman.conf
+          grep -A1 -E '^\[cachyos\]$' /etc/pacman.conf
           test -f /etc/pacman.d/cachyos-v4-mirrorlist
           pacman -Syy --noconfirm
 
