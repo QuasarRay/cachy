@@ -7,6 +7,7 @@ from cachy_pipeline.contracts import ContractViolation, contract_registry
 from cachy_pipeline.source_locker import (
     SOURCE_LOCK_SCHEMA_VERSION,
     build_git_source_lock,
+    build_source_lock,
     parse_git_resolution_evidence,
     source_lock_json,
 )
@@ -43,7 +44,7 @@ class SourceLockProducerTests(unittest.TestCase):
         self.assertEqual(payload["requested_ref"], "cachyos")
         self.assertRegex(payload["resolved_commit_or_version"], r"^[0-9a-f]{40}$")
 
-    def test_rejects_symbolic_resolved_ref(self) -> None:
+    def test_rejects_symbolic_resolved_git_ref(self) -> None:
         values = self._valid()
         values["resolved_commit_or_version"] = "cachyos"
         with self.assertRaisesRegex(ContractViolation, "immutable"):
@@ -54,6 +55,34 @@ class SourceLockProducerTests(unittest.TestCase):
         values["resolved_commit_or_version"] = "d" * 64
         payload = build_git_source_lock(**values)
         self.assertEqual(payload["resolved_commit_or_version"], "d" * 64)
+
+    def test_generic_source_lock_accepts_immutable_release_version(self) -> None:
+        values = self._valid()
+        values.update(
+            {
+                "source_name": "xray-linux-x86_64-release",
+                "requested_ref": "latest",
+                "resolved_commit_or_version": "25.8.3",
+                "retrieval_uri": "https://github.com/XTLS/Xray-core/releases/download/v25.8.3/Xray-linux-64.zip",
+            }
+        )
+        payload = build_source_lock(**values)
+        self.assertEqual(payload["requested_ref"], "latest")
+        self.assertEqual(payload["resolved_commit_or_version"], "25.8.3")
+        self.assertEqual(tuple(payload), contract_registry()["SourceLock"])
+
+    def test_generic_source_lock_rejects_local_release_asset(self) -> None:
+        values = self._valid()
+        values.update(
+            {
+                "source_name": "release",
+                "requested_ref": "latest",
+                "resolved_commit_or_version": "1.0.0",
+                "retrieval_uri": "/tmp/release.tar.gz",
+            }
+        )
+        with self.assertRaisesRegex(ContractViolation, "network-retrievable"):
+            build_source_lock(**values)
 
     def test_rejects_non_sha256_content_digest(self) -> None:
         values = self._valid()
@@ -100,12 +129,15 @@ class SourceLockEvidenceTests(unittest.TestCase):
             "toolchain_digest=sha256:" + "c" * 64 + "\n"
             "retrieved_at=2026-08-12T12:34:56Z\n"
         )
-        self.assertEqual(set(evidence), {
-            "resolved_commit_or_version",
-            "content_digest",
-            "toolchain_digest",
-            "retrieved_at",
-        })
+        self.assertEqual(
+            set(evidence),
+            {
+                "resolved_commit_or_version",
+                "content_digest",
+                "toolchain_digest",
+                "retrieved_at",
+            },
+        )
 
     def test_rejects_unknown_resolver_evidence(self) -> None:
         with self.assertRaisesRegex(ContractViolation, "unexpected"):
