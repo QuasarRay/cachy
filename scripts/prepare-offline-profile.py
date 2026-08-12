@@ -39,7 +39,7 @@ LocalFileSigLevel = Optional
 CacheDir = /var/cache/pacman/pkg
 ParallelDownloads = 5
 
-[cachyos-offline]
+[cachyos-lxqt-offline]
 SigLevel = Optional TrustAll
 Server = file:///var/cache/pacman/pkg
 """)
