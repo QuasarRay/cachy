@@ -177,7 +177,7 @@ pacman -Sy --noconfirm --dbpath /resolver-db
 mapfile -t packages < /out/top-level-packages.txt
 (( ${#packages[@]} > 0 ))
 pacman -Sp --noconfirm --dbpath /resolver-db \
-  --print-format '%n\t%v\t%r\t%s\t%l' \
+  --print-format $'%n\t%v\t%r\t%s\t%l' \
   "${packages[@]}" > /out/resolved-packages.tsv
 test -s /out/resolved-packages.tsv
 
