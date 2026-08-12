@@ -1,0 +1,32 @@
+name: Validate hybrid Dagger pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'pipeline/**'
+      - '.github/workflows/validate-hybrid-pipeline.yml'
+  pull_request:
+    paths:
+      - 'pipeline/**'
+      - '.github/workflows/validate-hybrid-pipeline.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: Contract and boundary validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate through Dagger
+        uses: dagger/dagger-for-github@v8.3.0
+        with:
+          version: '0.21.8'
+          verb: call
+          module: ./pipeline
+          args: check-contracts --source=.
