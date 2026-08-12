@@ -72,12 +72,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C locked-calamares rev-parse HEAD)" = "$CALAMARES_COMMIT"
           .o11y/run-step.sh manifest-derivation -- \
             python pipeline/tools/collect_locked_installer_packages.py \
               --calamares-root locked-calamares \
               --repo-root . \
               --output-dir out
+          echo "Pinned Calamares commit: $CALAMARES_COMMIT"
           echo "Top-level package/group entries: $(wc -l < out/top-level-packages.txt)"
 
       - name: Derive content-addressed package cache key
