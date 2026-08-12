@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: cachyos-lxqt-offline-iso
@@ -283,4 +284,96 @@ jobs:
             external/packages/EXTERNAL-SHA256SUMS
           if-no-files-found: error
           compression-level: 0
+          retention-days: 14
+
+  failure-diagnostics:
+    name: Collect failure diagnostics on a fresh runner
+    if: ${{ always() && (needs.build-amnezia.result == 'failure' || needs.build-amnezia.result == 'cancelled' || needs.build-iso.result == 'failure' || needs.build-iso.result == 'cancelled') }}
+    needs: [build-amnezia, build-iso]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BUILDEVENT_APIKEY: ${{ secrets.HONEYCOMB_API_KEY }}
+      BUILDEVENT_DATASET: ${{ secrets.HONEYCOMB_DATASET }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout observability tooling
+        uses: actions/checkout@v4
+
+      - name: Initialize fresh-runner observability
+        shell: bash
+        run: bash .o11y/setup.sh
+
+      - name: Recover logs from failed or cancelled jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .o11y/runtime
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "${API}/actions/runs/${GITHUB_RUN_ID}/jobs?per_page=100" \
+            -o .o11y/runtime/jobs.json
+
+          jq -r '.jobs[] | select(.conclusion == "failure" or .conclusion == "cancelled") | [.id, .name] | @tsv' \
+            .o11y/runtime/jobs.json > .o11y/runtime/failed-jobs.tsv
+
+          while IFS=$'\t' read -r job_id job_name; do
+            [ -n "$job_id" ] || continue
+            safe_name=$(printf '%s' "$job_name" | tr -cs 'A-Za-z0-9_.-' '_')
+            tmp=$(mktemp)
+            if curl -fsSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "${API}/actions/jobs/${job_id}/logs" -o "$tmp"; then
+              if unzip -t "$tmp" >/dev/null 2>&1; then
+                unzip -p "$tmp" > ".o11y/runtime/${safe_name}.log"
+              else
+                mv "$tmp" ".o11y/runtime/${safe_name}.log"
+              fi
+            else
+              printf 'unable to recover GitHub log for job %s (%s)\n' "$job_name" "$job_id" \
+                > ".o11y/runtime/${safe_name}.log"
+              rm -f "$tmp"
+            fi
+          done < .o11y/runtime/failed-jobs.tsv
+
+          classification=workflow_failure
+          if grep -Eiq 'runner has received a shutdown signal|exit code 143|SIGTERM' .o11y/runtime/*.log 2>/dev/null; then
+            classification=runner_shutdown
+          elif grep -Eiq 'exit code 137|out of memory|oom-kill|killed process' .o11y/runtime/*.log 2>/dev/null; then
+            classification=out_of_memory
+          elif grep -Eiq 'no space left on device' .o11y/runtime/*.log 2>/dev/null; then
+            classification=disk_exhaustion
+          elif grep -Eiq 'timed out|timeout' .o11y/runtime/*.log 2>/dev/null; then
+            classification=timeout
+          fi
+          printf '%s\n' "$classification" | tee .o11y/runtime/failure-classification.log
+
+      - name: Report recovered failure to Sentry
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=python
+          if [ -x .o11y/.venv/bin/python ]; then PY=.o11y/.venv/bin/python; fi
+          "$PY" .o11y/report_failure.py --job recovered-workflow-failure
+
+      - name: Finalize recovered Honeycomb trace
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: bash .o11y/finalize.sh failure
+
+      - name: Upload recovered diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o11y-recovered-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .o11y/runtime/
+          if-no-files-found: error
           retention-days: 14
