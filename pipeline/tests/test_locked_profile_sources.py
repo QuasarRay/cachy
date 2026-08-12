@@ -57,10 +57,8 @@ class LockedProfileSourceTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
-            overlay = (
-                profile
-                / "airootfs/usr/local/lib/cachyos-offline-overlay/rootfs"
-            )
+            airootfs = profile / "airootfs"
+            overlay = airootfs / "usr/local/lib/cachyos-offline-overlay/rootfs"
             patched_wrapper = (
                 overlay / "etc/calamares/scripts/pacstrap_calamares"
             ).read_text()
@@ -73,6 +71,17 @@ class LockedProfileSourceTests(unittest.TestCase):
                 "default: LXQT-Desktop",
                 (overlay / "etc/calamares/modules/packagechooser_desktop.conf").read_text(),
             )
+
+            offline_repo = airootfs / "opt/cachyos-offline-repo"
+            self.assertTrue((offline_repo / "alpha-1-x86_64.pkg.tar.zst").is_file())
+            self.assertFalse((airootfs / "var/cache/pacman/pkg").exists())
+
+            offline_pacman = (airootfs / "etc/pacman-offline.conf").read_text()
+            self.assertIn("CacheDir = /opt/cachyos-offline-repo", offline_pacman)
+            self.assertIn(
+                "Server = file:///opt/cachyos-offline-repo", offline_pacman
+            )
+            self.assertNotIn("CacheDir = /var/cache/pacman/pkg", offline_pacman)
 
 
 if __name__ == "__main__":
