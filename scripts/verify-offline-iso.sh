@@ -1,21 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (( $# != 2 )); then
-  echo "usage: $0 ISO SOURCE_REPOSITORY_DIR" >&2
+if (( $# != 1 )); then
+  echo "usage: $0 ISO" >&2
   exit 64
 fi
 
 iso=$(realpath "$1")
-source_repo=$(realpath "$2")
-source_db="$source_repo/cachyos-lxqt-offline.db.tar.zst"
-source_sums="$source_repo/SHA256SUMS"
-
 [[ -s "$iso" ]] || { echo "ISO not found or empty: $iso" >&2; exit 1; }
-[[ -s "$source_db" ]] || { echo "source repository DB missing: $source_db" >&2; exit 1; }
-[[ -s "$source_sums" ]] || { echo "source checksum manifest missing: $source_sums" >&2; exit 1; }
 
-for cmd in mount umount mountpoint unsquashfs tar awk grep find sort sha256sum cmp realpath; do
+for cmd in mount umount mountpoint unsquashfs tar awk grep find sort sha256sum realpath; do
   command -v "$cmd" >/dev/null || { echo "required command missing: $cmd" >&2; exit 1; }
 done
 
@@ -53,43 +47,53 @@ sfs_cat() {
   }
 }
 
-sfs_cat var/cache/pacman/pkg/cachyos-lxqt-offline.db.tar.zst "$tmp_dir/repo.db.tar.zst"
-sfs_cat var/cache/pacman/pkg/SHA256SUMS "$tmp_dir/SHA256SUMS"
+# Extract the finished ISO's repository once. This verifies the package bytes
+# that are actually inside the artifact rather than re-checking the build workspace.
+mkdir -p "$tmp_dir/rootfs"
+unsquashfs -f -d "$tmp_dir/rootfs" "$rootfs" var/cache/pacman/pkg >/dev/null
+repo="$tmp_dir/rootfs/var/cache/pacman/pkg"
+test -d "$repo"
+test -s "$repo/cachyos-lxqt-offline.db.tar.zst"
+test -s "$repo/SHA256SUMS"
 
-cmp -s "$source_db" "$tmp_dir/repo.db.tar.zst" || {
-  echo "repository DB embedded in ISO differs from the exact pre-build repository DB" >&2
-  exit 1
-}
-cmp -s "$source_sums" "$tmp_dir/SHA256SUMS" || {
-  echo "package checksum manifest embedded in ISO differs from the exact pre-build manifest" >&2
-  exit 1
-}
-
-unsquashfs -ll "$rootfs" var/cache/pacman/pkg >"$tmp_dir/cache-listing.txt"
-awk '/squashfs-root\/var\/cache\/pacman\/pkg\// { name=$NF; sub(/^.*\//, "", name); if (name != "") print name }' \
-  "$tmp_dir/cache-listing.txt" | sort -u >"$tmp_dir/cache-files.txt"
-
-expected_archives=0
-while read -r digest filename; do
-  [[ -n "${digest:-}" && -n "${filename:-}" ]] || continue
-  filename=${filename#\*}
-  [[ "$filename" != */* ]] || {
-    echo "unexpected path in embedded SHA256SUMS: $filename" >&2
-    exit 1
-  }
-  if ! grep -Fxq "$filename" "$tmp_dir/cache-files.txt"; then
-    echo "package archive named by embedded SHA256SUMS is absent from ISO: $filename" >&2
-    exit 1
-  fi
-  ((expected_archives += 1))
-done <"$tmp_dir/SHA256SUMS"
-(( expected_archives > 0 )) || { echo "embedded SHA256SUMS contains no package archives" >&2; exit 1; }
+# The build-generated checksum manifest must validate every package archive
+# embedded in the ISO.
+(
+  cd "$repo"
+  sha256sum --strict --quiet -c SHA256SUMS
+)
 
 mkdir -p "$tmp_dir/repo-db"
-tar --zstd -xf "$tmp_dir/repo.db.tar.zst" -C "$tmp_dir/repo-db"
-find "$tmp_dir/repo-db" -type f -name desc \
-  -exec awk '$0 == "%NAME%" { getline; print }' {} + | sort -u >"$tmp_dir/repo-package-names.txt"
-repo_package_count=$(wc -l <"$tmp_dir/repo-package-names.txt")
+tar --zstd -xf "$repo/cachyos-lxqt-offline.db.tar.zst" -C "$tmp_dir/repo-db"
+
+repo_package_count=0
+: >"$tmp_dir/repo-package-names.txt"
+while IFS= read -r desc; do
+  name=$(awk '$0 == "%NAME%" { getline; print; exit }' "$desc")
+  filename=$(awk '$0 == "%FILENAME%" { getline; print; exit }' "$desc")
+  expected_sha=$(awk '$0 == "%SHA256SUM%" { getline; print; exit }' "$desc")
+
+  [[ -n "$name" && -n "$filename" && -n "$expected_sha" ]] || {
+    echo "repository metadata entry is missing NAME, FILENAME, or SHA256SUM: $desc" >&2
+    exit 1
+  }
+  [[ "$filename" != */* ]] || {
+    echo "repository metadata contains an unsafe package path: $filename" >&2
+    exit 1
+  }
+  [[ -s "$repo/$filename" ]] || {
+    echo "repository DB references a package archive absent from ISO: $filename" >&2
+    exit 1
+  }
+  actual_sha=$(sha256sum "$repo/$filename" | awk '{print $1}')
+  [[ "$actual_sha" == "$expected_sha" ]] || {
+    echo "repository DB checksum mismatch for $name ($filename)" >&2
+    exit 1
+  }
+  printf '%s\n' "$name" >>"$tmp_dir/repo-package-names.txt"
+  ((repo_package_count += 1))
+done < <(find "$tmp_dir/repo-db" -type f -name desc -print | sort)
+sort -u -o "$tmp_dir/repo-package-names.txt" "$tmp_dir/repo-package-names.txt"
 (( repo_package_count > 0 )) || { echo "embedded repository DB contains no packages" >&2; exit 1; }
 
 external_packages=(
@@ -103,19 +107,6 @@ external_packages=(
 for pkg in "${external_packages[@]}"; do
   grep -Fxq "$pkg" "$tmp_dir/repo-package-names.txt" || {
     echo "required external package missing from embedded repository DB: $pkg" >&2
-    exit 1
-  }
-
-  archive=$(awk -v p="$pkg" '$2 ~ ("^" p "-") && $2 ~ /\.pkg\.tar\.zst$/ { print $2; exit }' "$tmp_dir/SHA256SUMS")
-  [[ -n "$archive" ]] || {
-    echo "required external package archive missing from embedded SHA256SUMS: $pkg" >&2
-    exit 1
-  }
-  sfs_cat "var/cache/pacman/pkg/$archive" "$tmp_dir/$archive"
-  expected_digest=$(awk -v f="$archive" '$2 == f { print $1; exit }' "$source_sums")
-  actual_digest=$(sha256sum "$tmp_dir/$archive" | awk '{print $1}')
-  [[ -n "$expected_digest" && "$actual_digest" == "$expected_digest" ]] || {
-    echo "embedded external package checksum mismatch: $pkg" >&2
     exit 1
   }
 done
@@ -147,12 +138,13 @@ if grep -Fq 'packages@online' "$tmp_dir/settings_online.conf"; then
   exit 1
 fi
 
+archive_count=$(find "$repo" -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)
 sha256sum "$iso"
 echo "Verified finished ISO artifact:"
-echo "  embedded repository packages: $repo_package_count"
-echo "  package archives named by checksum manifest: $expected_archives"
-echo "  exact repository DB: matches pre-build source"
-echo "  exact checksum manifest: matches pre-build source"
-echo "  external package payloads: checksum verified"
+echo "  repository DB package entries: $repo_package_count"
+echo "  embedded package archives: $archive_count"
+echo "  all package archives: SHA256SUMS verified"
+echo "  all repository DB package hashes: verified against embedded bytes"
+echo "  required external packages: present"
 echo "  zero-network Calamares overlay: present in final live root"
 echo "  LXQt desktop default: present in final live root"
