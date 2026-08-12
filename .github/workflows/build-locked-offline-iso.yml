@@ -1,0 +1,451 @@
+name: Build Locked CachyOS LXQt Offline ISO
+
+on:
+  push:
+    branches: [agent/iso-build-run]
+    paths:
+      - '.github/workflows/build-locked-offline-iso.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cachyos-lxqt-locked-offline-iso
+  cancel-in-progress: false
+
+env:
+  CALAMARES_COMMIT: f1c20a500e14448e36991f1b9d3ebae153827761
+  CACHYOS_LIVE_ISO_COMMIT: 4937780541814b4b0ec7c212c00fe06299f799b6
+  VALIDATOR_COMMIT: 1b4011571a682e8e1dd31099c40d75365705f5c7
+  CACHE_DIR: .cache/pacman/pkg
+  DB_DIR: .cache/pacman/db
+
+jobs:
+  build-amnezia:
+    name: Build pinned Amnezia package input
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      BUILDEVENT_APIKEY: ${{ secrets.HONEYCOMB_API_KEY }}
+      BUILDEVENT_DATASET: ${{ secrets.HONEYCOMB_DATASET }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
+    steps:
+      - name: Checkout custom ISO specification
+        uses: actions/checkout@v4
+        with:
+          path: custom
+
+      - name: Checkout official Amnezia source
+        uses: actions/checkout@v4
+        with:
+          repository: amnezia-vpn/amnezia-client
+          ref: '4.8.21.0'
+          path: amnezia-src
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Initialize CI observability
+        shell: bash
+        run: bash custom/.o11y/setup.sh
+
+      - name: Install pinned Qt toolchain
+        uses: jurplel/install-qt-action@v3
+        with:
+          version: '6.10.1'
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: 'qtremoteobjects qt5compat qtshadertools'
+          dir: ${{ runner.temp }}
+          setup-python: 'true'
+          tools: 'tools_ifw'
+          set-env: 'true'
+          aqtversion: '==3.3.0'
+          py7zrversion: '==0.22.*'
+
+      - name: Build official Linux installer with bounded concurrency
+        shell: bash
+        working-directory: amnezia-src
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-0 libsecret-1-dev p7zip-full unzip wget
+          export QT_BIN_DIR="${RUNNER_TEMP}/Qt/6.10.1/gcc_64/bin"
+          export QIF_BIN_DIR="${RUNNER_TEMP}/Qt/Tools/QtInstallerFramework/4.7/bin"
+          export CMAKE_BUILD_PARALLEL_LEVEL=2
+
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('deploy/build_linux.sh')
+          text = path.read_text()
+          old = 'cmake --build . -j --config release'
+          new = 'cmake --build . -j2 --config release'
+          if old not in text:
+              raise SystemExit(f'expected upstream build command not found: {old}')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          grep -F 'cmake --build . -j2 --config release' deploy/build_linux.sh
+
+          ../custom/.o11y/run-step.sh amnezia-build -- bash deploy/build_linux.sh
+          test -s deploy/AmneziaVPN_Linux_Installer.bin
+
+      - name: Upload source-built Amnezia installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: amnezia-linux-source-built-locked
+          path: amnezia-src/deploy/AmneziaVPN_Linux_Installer.bin
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Report Amnezia failure
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=python
+          if [ -x custom/.o11y/.venv/bin/python ]; then PY=custom/.o11y/.venv/bin/python; fi
+          "$PY" custom/.o11y/report_failure.py --job locked-build-amnezia
+
+      - name: Finalize Amnezia observability
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: bash custom/.o11y/finalize.sh "${{ job.status }}"
+
+      - name: Upload Amnezia diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o11y-locked-amnezia-${{ github.run_id }}
+          path: custom/.o11y/runtime/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  build-iso:
+    name: Build locked offline ISO
+    needs: build-amnezia
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    container:
+      image: archlinux:base-devel
+      options: --privileged
+    env:
+      BUILDEVENT_APIKEY: ${{ secrets.HONEYCOMB_API_KEY }}
+      BUILDEVENT_DATASET: ${{ secrets.HONEYCOMB_DATASET }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
+    steps:
+      - name: Checkout custom ISO specification
+        uses: actions/checkout@v4
+
+      - name: Checkout locked Calamares source
+        uses: actions/checkout@v4
+        with:
+          repository: CachyOS/cachyos-calamares
+          ref: ${{ env.CALAMARES_COMMIT }}
+          path: locked-calamares
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bootstrap Arch tools and CachyOS v4 repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed python python-yaml curl jq git sudo gnupg
+          pacman-key --init
+          pacman-key --populate archlinux
+          pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
+          pacman-key --lsign-key F3B607488DB35A47
+          pacman -U --noconfirm \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-27-1-any.pkg.tar.zst \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-v3-mirrorlist-27-1-any.pkg.tar.zst \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-v4-mirrorlist-27-1-any.pkg.tar.zst
+          python scripts/force-cachyos-v4.py /etc/pacman.conf
+          sed -i '/^#\[multilib\]$/,+1 s/^#//' /etc/pacman.conf
+          pacman -Syy --noconfirm
+
+      - name: Initialize CI observability
+        shell: bash
+        run: bash .o11y/setup.sh
+
+      - name: Derive installer manifest from locked Calamares tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          .o11y/run-step.sh manifest-derivation -- \
+            python pipeline/tools/collect_locked_installer_packages.py \
+              --calamares-root locked-calamares \
+              --repo-root . \
+              --output-dir out
+          echo "Pinned Calamares commit: $CALAMARES_COMMIT"
+          echo "Top-level package/group entries: $(wc -l < out/top-level-packages.txt)"
+
+      - name: Derive exact package cache key
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_input_hash="$({
+            printf 'calamares=%s\n' "$CALAMARES_COMMIT"
+            sha256sum \
+              manifests/offline-extras.txt \
+              manifests/repo-defaults.txt \
+              pipeline/tools/collect_locked_installer_packages.py \
+              scripts/force-cachyos-v4.py | sort -k2
+          } | sha256sum | cut -d' ' -f1)"
+          echo "PACKAGE_CACHE_KEY=cachyos-lxqt-v4-${package_input_hash}" >> "$GITHUB_ENV"
+          echo "Package cache key: cachyos-lxqt-v4-${package_input_hash}"
+
+      - name: Restore exact package payload cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/pacman/pkg
+            .cache/pacman/db
+          key: ${{ env.PACKAGE_CACHE_KEY }}
+          fail-on-cache-miss: true
+
+      - name: Verify restored package payload bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst"
+          test -s "$CACHE_DIR/SHA256SUMS"
+          (
+            cd "$CACHE_DIR"
+            sha256sum --strict --quiet -c SHA256SUMS
+          )
+          echo "Cached package archives: $(find "$CACHE_DIR" -maxdepth 1 -name '*.pkg.tar.zst' | wc -l)"
+          du -sh "$CACHE_DIR"
+
+      - name: Download source-built Amnezia installer
+        uses: actions/download-artifact@v4
+        with:
+          name: amnezia-linux-source-built-locked
+          path: external/amnezia
+
+      - name: Bootstrap archiso build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -S --noconfirm --needed \
+            archiso cachyos-keyring mkinitcpio-archiso squashfs-tools grub \
+            unzip libarchive
+          useradd -m builder || true
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+          {
+            uname -a
+            pacman --version
+            mkarchiso -h 2>&1 | head -n 3 || true
+            df -h /
+            free -h
+          } | tee out/build-toolchain.txt
+
+      - name: Build and verify external offline packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          AMNEZIA_INSTALLER=$(find external/amnezia -type f -name 'AmneziaVPN_Linux_Installer.bin' -print -quit)
+          test -n "$AMNEZIA_INSTALLER"
+          .o11y/run-step.sh external-packages -- \
+            bash scripts/build-external-packages.sh external/packages "$AMNEZIA_INSTALLER"
+          cp external/packages/*.pkg.tar.zst "$CACHE_DIR/"
+          rm -f "$CACHE_DIR"/cachyos-lxqt-offline.db* "$CACHE_DIR"/cachyos-lxqt-offline.files*
+          repo-add "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst" "$CACHE_DIR"/*.pkg.tar.zst
+          touch "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst" \
+                "$CACHE_DIR/cachyos-lxqt-offline.files.tar.zst"
+          touch -h "$CACHE_DIR/cachyos-lxqt-offline.db" \
+                   "$CACHE_DIR/cachyos-lxqt-offline.files"
+          (cd "$CACHE_DIR" && sha256sum -- *.pkg.tar.zst | sort -k2 > SHA256SUMS)
+          test -s external/packages/EXTERNAL-SHA256SUMS
+
+      - name: Prove full requested graph resolves without network repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          CACHE=$(realpath "$CACHE_DIR")
+          cat > /tmp/pacman-offline.conf <<EOF
+          [options]
+          Architecture = x86_64 x86_64_v2 x86_64_v3 x86_64_v4
+          SigLevel = Never
+          CacheDir = $CACHE
+          [cachyos-lxqt-offline]
+          SigLevel = Never
+          Server = file://$CACHE
+          EOF
+          rm -rf /tmp/offline-db
+          mkdir -p /tmp/offline-db/local /tmp/offline-db/sync
+          pacman --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm
+          mapfile -t packages < out/top-level-packages.txt
+          packages+=(windscribe-cli sing-box xray-offline visual-studio-code-offline tor-browser-offline amnezia-vpn-offline)
+          .o11y/run-step.sh offline-resolution -- \
+            pacman --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db \
+              -Sp --noconfirm "${packages[@]}" > out/offline-resolution-urls.txt
+          echo "Offline package graph resolves: ${#packages[@]} explicit targets"
+
+      - name: Materialize exact CachyOS live ISO source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init cachyos-live
+          git -C cachyos-live remote add origin https://github.com/CachyOS/CachyOS-Live-ISO.git
+          .o11y/run-step.sh live-iso-source -- \
+            git -C cachyos-live fetch --depth 1 origin "$CACHYOS_LIVE_ISO_COMMIT"
+          git -C cachyos-live checkout --detach FETCH_HEAD
+          actual=$(git -C cachyos-live rev-parse HEAD)
+          test "$actual" = "$CACHYOS_LIVE_ISO_COMMIT"
+          printf '%s\n' "$actual" | tee out/cachyos-live-iso-commit.txt
+
+      - name: Inject local repository and zero-network Calamares configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/prepare-offline-profile.py \
+            cachyos-live/archiso "$CACHE_DIR" out/top-level-packages.txt
+
+          AIROOT=cachyos-live/archiso/airootfs
+          OVERLAY="$AIROOT/usr/local/lib/cachyos-offline-overlay/rootfs"
+          test -d "$OVERLAY"
+          test -x "$AIROOT/usr/local/lib/cachyos-offline-overlay/apply.sh"
+          test -s "$AIROOT/etc/pacman.d/hooks/00-cachyos-offline-overlay.hook"
+          grep -q 'default: LXQT-Desktop' "$OVERLAY/etc/calamares/modules/packagechooser_desktop.conf"
+          grep -Fq 'pacman -r "$newroot" -Sy --config=/etc/pacman.conf' \
+            "$OVERLAY/etc/calamares/scripts/pacstrap_calamares"
+          ! grep -Fq 'pacman --sysroot "$newroot"' \
+            "$OVERLAY/etc/calamares/scripts/pacstrap_calamares"
+          ! grep -q 'pacman -Sy' "$AIROOT/usr/local/bin/calamares-online.sh"
+          ! grep -q 'internet' "$OVERLAY/etc/calamares/modules/welcome_online.conf"
+          test ! -e "$AIROOT/etc/calamares/modules/pacstrap.conf"
+          test ! -e "$AIROOT/etc/calamares/modules/packagechooser_desktop.conf"
+          test ! -e "$AIROOT/etc/calamares/modules/shellprocess-before-online.conf"
+          test ! -e "$AIROOT/etc/calamares/modules/welcome_online.conf"
+          test ! -e "$AIROOT/usr/share/calamares/settings_online.conf"
+
+      - name: Enforce build disk headroom budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache_bytes=$(du -sb "$CACHE_DIR" | cut -f1)
+          free_bytes=$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -n1 | tr -d ' ')
+          required_bytes=$(( cache_bytes * 2 + 8 * 1024 * 1024 * 1024 ))
+          {
+            echo "cache_bytes=$cache_bytes"
+            echo "free_bytes=$free_bytes"
+            echo "required_bytes=$required_bytes"
+          } | tee out/resource-budget.txt
+          if (( free_bytes < required_bytes )); then
+            echo "insufficient disk headroom for mkarchiso" >&2
+            exit 1
+          fi
+
+      - name: Build custom ISO
+        shell: bash
+        working-directory: cachyos-live
+        run: |
+          set -euo pipefail
+          chmod -R a+rwX .
+          ../.o11y/run-step.sh mkarchiso -- sudo -H -E -u builder ./buildiso.sh -p desktop -v -w
+
+      - name: Record candidate ISO provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISO=$(find cachyos-live/out -type f -name '*.iso' -print -quit)
+          test -n "$ISO"
+          sha256sum "$ISO" | tee out/ISO-SHA256SUMS
+          du -h "$ISO" | tee out/iso-size.txt
+          {
+            echo "source_commit=${GITHUB_SHA}"
+            echo "calamares_commit=${CALAMARES_COMMIT}"
+            echo "live_iso_commit=${CACHYOS_LIVE_ISO_COMMIT}"
+            echo "package_cache_key=${PACKAGE_CACHE_KEY}"
+          } | tee out/candidate-provenance.txt
+          echo "ISO=$ISO" >> "$GITHUB_ENV"
+
+      - name: Upload ISO candidate and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-lxqt-v4-offline-workstation-locked
+          path: |
+            ${{ env.ISO }}
+            out/
+            external/packages/EXTERNAL-SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Report ISO build failure
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=python
+          if [ -x .o11y/.venv/bin/python ]; then PY=.o11y/.venv/bin/python; fi
+          "$PY" .o11y/report_failure.py --job locked-build-iso
+
+      - name: Finalize ISO observability
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: bash .o11y/finalize.sh "${{ job.status }}"
+
+      - name: Upload ISO diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o11y-locked-iso-${{ github.run_id }}
+          path: .o11y/runtime/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  certify-iso:
+    name: Certify finished ISO on fresh runner
+    needs: build-iso
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout pinned independent validator
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VALIDATOR_COMMIT }}
+          path: validator
+          persist-credentials: false
+
+      - name: Download ISO candidate from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: cachyos-lxqt-v4-offline-workstation-locked
+          path: candidate
+
+      - name: Install artifact inspection tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools zstd util-linux
+          df -h /
+
+      - name: Validate embedded repository and installer state
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISO=$(find candidate -type f -name '*.iso' -print -quit)
+          test -n "$ISO"
+          mkdir -p verified
+          sha256sum "$ISO" | tee verified/ISO-SHA256SUMS
+          du -h "$ISO" | tee verified/iso-size.txt
+          sudo bash validator/scripts/verify-offline-iso.sh "$ISO" | tee verified/offline-iso-validation.log
+
+      - name: Upload independent certification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-lxqt-v4-offline-workstation-locked-verification-${{ github.run_id }}
+          path: verified/
+          if-no-files-found: error
+          retention-days: 14
