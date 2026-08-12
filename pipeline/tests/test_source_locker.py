@@ -9,6 +9,7 @@ from cachy_pipeline.source_locker import (
     build_git_source_lock,
     parse_git_resolution_evidence,
     source_lock_json,
+    validate_git_source_request,
 )
 
 
@@ -90,6 +91,14 @@ class SourceLockProducerTests(unittest.TestCase):
         values["requested_ref"] = "main\nmalicious"
         with self.assertRaisesRegex(ContractViolation, "control"):
             build_git_source_lock(**values)
+
+    def test_rejects_option_like_ref_before_git_resolution(self) -> None:
+        with self.assertRaisesRegex(ContractViolation, "must not begin"):
+            validate_git_source_request(
+                source_name="source",
+                requested_ref="--upload-pack=evil",
+                retrieval_uri="https://github.com/QuasarRay/cachy.git",
+            )
 
 
 class SourceLockEvidenceTests(unittest.TestCase):
