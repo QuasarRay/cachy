@@ -17,7 +17,7 @@ for raw in manifest.read_text().splitlines():
     value = raw.split("#", 1)[0].strip()
     if value and value not in pkgs:
         pkgs.append(value)
-for value in ["windscribe", "sing-box", "xray-offline", "visual-studio-code-offline", "tor-browser-offline", "amnezia-vpn-offline"]:
+for value in ["windscribe-cli", "sing-box", "xray-offline", "visual-studio-code-offline", "tor-browser-offline", "amnezia-vpn-offline"]:
     if value not in pkgs:
         pkgs.append(value)
 
