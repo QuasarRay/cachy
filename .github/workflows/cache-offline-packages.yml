@@ -7,6 +7,7 @@ on:
       - '.github/workflows/cache-offline-packages.yml'
       - 'manifests/**'
       - 'scripts/**'
+      - '.o11y/**'
   workflow_dispatch:
 
 permissions:
@@ -22,6 +23,10 @@ jobs:
     timeout-minutes: 120
     container:
       image: archlinux:latest
+    env:
+      BUILDEVENT_APIKEY: ${{ secrets.HONEYCOMB_API_KEY }}
+      BUILDEVENT_DATASET: ${{ secrets.HONEYCOMB_DATASET }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
 
     steps:
       - name: Check out workspace
@@ -37,10 +42,6 @@ jobs:
           pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
           pacman-key --lsign-key F3B607488DB35A47
 
-          # These are the current bootstrap packages documented by CachyOS.
-          # We deliberately do not install the CachyOS pacman fork here: the
-          # stock Arch pacman is enough to resolve/download the ISO package set,
-          # and avoids host-runner CPU auto-detection and container hook issues.
           pacman -U --noconfirm \
             https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst \
             https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-27-1-any.pkg.tar.zst \
@@ -48,29 +49,28 @@ jobs:
             https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-v4-mirrorlist-27-1-any.pkg.tar.zst
 
           python scripts/force-cachyos-v4.py /etc/pacman.conf
-          # CachyOS's live installer enables multilib; it is required by Steam,
-          # Wine and the 32-bit NVIDIA/Vulkan packages in the offline closure.
           sed -i '/^#\[multilib\]$/,+1 s/^#//' /etc/pacman.conf
-          grep -A1 -E '^\[cachyos-(v4|core-v4|extra-v4)\]$' /etc/pacman.conf
-          grep -A1 -E '^\[cachyos\]$' /etc/pacman.conf
-          grep -A1 -E '^\[multilib\]$' /etc/pacman.conf
           test -f /etc/pacman.d/cachyos-v4-mirrorlist
           pacman -Syy --noconfirm
+
+      - name: Initialize CI observability
+        shell: bash
+        run: bash .o11y/setup.sh
 
       - name: Derive current installer package manifest
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/collect-installer-packages.py
+          .o11y/run-step.sh manifest-derivation -- python scripts/collect-installer-packages.py
           echo "Top-level package/group entries: $(wc -l < out/top-level-packages.txt)"
 
-      - name: Restore matching package cache
+      - name: Restore reusable package payloads
         uses: actions/cache/restore@v4
         with:
           path: |
             .cache/pacman/pkg
             .cache/pacman/db
-          key: cachyos-lxqt-v4-${{ hashFiles('out/source-manifest.json', 'out/top-level-packages.txt') }}
+          key: cachyos-lxqt-v4-${{ github.sha }}
           restore-keys: |
             cachyos-lxqt-v4-
 
@@ -81,9 +81,10 @@ jobs:
           mkdir -p "$CACHE_DIR" "$DB_DIR/local" "$DB_DIR/sync"
           pacman -Sy --noconfirm --dbpath "$DB_DIR"
           mapfile -t packages < out/top-level-packages.txt
-          pacman -Sp --noconfirm --dbpath "$DB_DIR" \
-            --print-format '%n\t%v\t%r\t%s\t%l' \
-            "${packages[@]}" | sort -u > out/resolved-packages.tsv
+          .o11y/run-step.sh package-resolution -- \
+            pacman -Sp --noconfirm --dbpath "$DB_DIR" \
+              --print-format '%n\t%v\t%r\t%s\t%l' \
+              "${packages[@]}" > out/resolved-packages.tsv
           echo "Resolved package records: $(wc -l < out/resolved-packages.tsv)"
 
       - name: Download complete package closure
@@ -91,9 +92,10 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t packages < out/top-level-packages.txt
-          pacman -Sw --noconfirm --dbpath "$DB_DIR" \
-            --cachedir "$CACHE_DIR" \
-            "${packages[@]}"
+          .o11y/run-step.sh package-download -- \
+            pacman -Sw --noconfirm --dbpath "$DB_DIR" \
+              --cachedir "$CACHE_DIR" \
+              "${packages[@]}"
 
       - name: Build local offline repository metadata and checksums
         shell: bash
@@ -107,7 +109,8 @@ jobs:
           fi
           rm -f "$CACHE_DIR"/cachyos-lxqt-offline.db* \
                 "$CACHE_DIR"/cachyos-lxqt-offline.files*
-          repo-add "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst" "${package_files[@]}"
+          .o11y/run-step.sh local-repo-index -- \
+            repo-add "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst" "${package_files[@]}"
           (
             cd "$CACHE_DIR"
             sha256sum -- *.pkg.tar.zst | sort -k2 > SHA256SUMS
@@ -116,20 +119,45 @@ jobs:
             echo "package_files=${#package_files[@]}"
             echo "cache_bytes=$(du -sb "$CACHE_DIR" | cut -f1)"
             echo "cache_human=$(du -sh "$CACHE_DIR" | cut -f1)"
+            echo "source_sha=${GITHUB_SHA}"
           } | tee out/cache-summary.txt
 
-      - name: Save package cache for later ISO job
+      - name: Save exact package cache for ISO job
         uses: actions/cache/save@v4
         with:
           path: |
             .cache/pacman/pkg
             .cache/pacman/db
-          key: cachyos-lxqt-v4-${{ hashFiles('out/source-manifest.json', 'out/top-level-packages.txt') }}
+          key: cachyos-lxqt-v4-${{ github.sha }}
 
-      - name: Upload review manifests only
+      - name: Upload review manifests
         uses: actions/upload-artifact@v4
         with:
           name: cachyos-lxqt-package-manifests-v4
           path: out/
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Report cache workflow failure
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=python
+          if [ -x .o11y/.venv/bin/python ]; then PY=.o11y/.venv/bin/python; fi
+          "$PY" .o11y/report_failure.py --job cache-packages
+
+      - name: Finalize cache observability
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: bash .o11y/finalize.sh "${{ job.status }}"
+
+      - name: Upload cache diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o11y-cache-${{ github.run_id }}
+          path: .o11y/runtime/
+          if-no-files-found: ignore
           retention-days: 14

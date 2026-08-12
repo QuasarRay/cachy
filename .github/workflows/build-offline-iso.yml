@@ -2,29 +2,46 @@ name: Build CachyOS LXQt Offline Workstation ISO
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/build-offline-iso.yml'
-      - 'scripts/build-external-packages.sh'
-      - 'scripts/prepare-offline-profile.py'
+  workflow_run:
+    workflows: ["Cache CachyOS LXQt offline packages"]
+    types: [completed]
 
 permissions:
   contents: read
 
+concurrency:
+  group: cachyos-lxqt-offline-iso
+  cancel-in-progress: false
+
 jobs:
   build-amnezia:
     name: Build Amnezia from official source
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+    env:
+      BUILDEVENT_APIKEY: ${{ secrets.HONEYCOMB_API_KEY }}
+      BUILDEVENT_DATASET: ${{ secrets.HONEYCOMB_DATASET }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
     steps:
+      - name: Checkout custom ISO specification
+        uses: actions/checkout@v4
+        with:
+          path: custom
+
       - name: Checkout official Amnezia source
         uses: actions/checkout@v4
         with:
           repository: amnezia-vpn/amnezia-client
           ref: '4.8.21.0'
+          path: amnezia-src
           submodules: recursive
           fetch-depth: 1
+
+      - name: Initialize CI observability
+        shell: bash
+        run: bash custom/.o11y/setup.sh
 
       - name: Install Qt used by upstream Linux build
         uses: jurplel/install-qt-action@v3
@@ -34,50 +51,107 @@ jobs:
           target: desktop
           arch: linux_gcc_64
           modules: 'qtremoteobjects qt5compat qtshadertools'
-          tools: 'tools_ifw'
+          dir: ${{ runner.temp }}
           setup-python: 'true'
+          tools: 'tools_ifw'
           set-env: 'true'
+          aqtversion: '==3.3.0'
+          py7zrversion: '==0.22.*'
 
       - name: Build official Linux installer
         shell: bash
+        working-directory: amnezia-src
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-x11-0 libsecret-1-dev ninja-build
-          python -m pip install 'conan==2.28.0'
-          deploy/build.sh --generator Ninja --installer all
-          test -n "$(find deploy/build -maxdepth 1 -name 'AmneziaVPN_*_linux_x64.run' -print -quit)"
+          sudo apt-get install -y libxkbcommon-x11-0 libsecret-1-dev p7zip-full unzip wget
+          export QT_BIN_DIR="${RUNNER_TEMP}/Qt/6.10.1/gcc_64/bin"
+          export QIF_BIN_DIR="${RUNNER_TEMP}/Qt/Tools/QtInstallerFramework/4.7/bin"
+          ../custom/.o11y/run-step.sh amnezia-build -- bash deploy/build_linux.sh
+          test -s deploy/AmneziaVPN_Linux_Installer.bin
 
       - name: Upload source-built Amnezia installer
         uses: actions/upload-artifact@v4
         with:
           name: amnezia-linux-source-built
-          path: deploy/build/AmneziaVPN_*_linux_x64.run
+          path: amnezia-src/deploy/AmneziaVPN_Linux_Installer.bin
           if-no-files-found: error
           retention-days: 7
 
+      - name: Report Amnezia build failure
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=python
+          if [ -x custom/.o11y/.venv/bin/python ]; then PY=custom/.o11y/.venv/bin/python; fi
+          "$PY" custom/.o11y/report_failure.py --job build-amnezia
+
+      - name: Finalize Amnezia observability
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: bash custom/.o11y/finalize.sh "${{ job.status }}"
+
+      - name: Upload Amnezia diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o11y-amnezia-${{ github.run_id }}
+          path: custom/.o11y/runtime/
+          if-no-files-found: ignore
+          retention-days: 14
+
   build-iso:
     name: Build offline ISO
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     needs: build-amnezia
     runs-on: ubuntu-latest
     timeout-minutes: 240
     container:
       image: archlinux:base-devel
       options: --privileged
+    env:
+      BUILDEVENT_APIKEY: ${{ secrets.HONEYCOMB_API_KEY }}
+      BUILDEVENT_DATASET: ${{ secrets.HONEYCOMB_DATASET }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
 
     steps:
       - name: Checkout custom ISO specification
         uses: actions/checkout@v4
 
-      - name: Restore verified expanded CachyOS package cache
+      - name: Bootstrap manifest tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed python python-yaml curl jq git sudo
+
+      - name: Initialize CI observability
+        shell: bash
+        run: bash .o11y/setup.sh
+
+      - name: Recreate current install target manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/collect-installer-packages.py
+          echo "Explicit repo-backed install targets: $(wc -l < out/top-level-packages.txt)"
+
+      - name: Restore exact verified CachyOS package cache
         uses: actions/cache/restore@v4
         with:
           path: |
             .cache/pacman/pkg
             .cache/pacman/db
-          key: cachyos-lxqt-v4-iso-${{ github.sha }}
-          restore-keys: |
-            cachyos-lxqt-v4-
+          key: cachyos-lxqt-v4-${{ github.event.workflow_run.head_sha || github.sha }}
+          fail-on-cache-miss: true
+
+      - name: Verify restored package cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$(find .cache/pacman/pkg -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)"
+          test -s .cache/pacman/pkg/cachyos-lxqt-offline.db.tar.zst
 
       - name: Download source-built Amnezia installer
         uses: actions/download-artifact@v4
@@ -94,34 +168,27 @@ jobs:
           pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
           pacman-key --lsign-key F3B607488DB35A47
           sed -i '/^\[core\]$/i[cachyos]\nServer = https://mirror.cachyos.org/repo/$arch/$repo\n' /etc/pacman.conf
-          pacman -Syu --noconfirm --needed \
+          pacman -S --noconfirm --needed \
             archiso cachyos-keyring mkinitcpio-archiso squashfs-tools grub \
-            git curl jq gnupg unzip libarchive sudo python python-yaml
+            gnupg unzip libarchive
           useradd -m builder || true
           echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
           chmod -R a+rwX "$GITHUB_WORKSPACE"
-          test -n "$(find .cache/pacman/pkg -maxdepth 1 -name '*.pkg.tar.zst' -print -quit)"
-
-      - name: Recreate current install target manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/collect-installer-packages.py
-          echo "Explicit repo-backed install targets: $(wc -l < out/top-level-packages.txt)"
 
       - name: Build and verify all external offline packages
         shell: bash
         run: |
           set -euo pipefail
-          AMNEZIA_RUN=$(find external/amnezia -type f -name '*.run' -print -quit)
-          test -n "$AMNEZIA_RUN"
-          bash scripts/build-external-packages.sh external/packages "$AMNEZIA_RUN"
+          AMNEZIA_INSTALLER=$(find external/amnezia -type f -name 'AmneziaVPN_Linux_Installer.bin' -print -quit)
+          test -n "$AMNEZIA_INSTALLER"
+          .o11y/run-step.sh external-packages -- \
+            bash scripts/build-external-packages.sh external/packages "$AMNEZIA_INSTALLER"
           cp external/packages/*.pkg.tar.zst .cache/pacman/pkg/
           rm -f .cache/pacman/pkg/cachyos-lxqt-offline.db* .cache/pacman/pkg/cachyos-lxqt-offline.files*
           repo-add .cache/pacman/pkg/cachyos-lxqt-offline.db.tar.zst .cache/pacman/pkg/*.pkg.tar.zst
           (cd .cache/pacman/pkg && sha256sum -- *.pkg.tar.zst | sort -k2 > SHA256SUMS)
 
-      - name: Prove the full requested package graph resolves with zero network repos
+      - name: Prove full requested package graph resolves with zero network repos
         shell: bash
         run: |
           set -euo pipefail
@@ -140,7 +207,9 @@ jobs:
           pacman --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm
           mapfile -t packages < out/top-level-packages.txt
           packages+=(windscribe sing-box xray-offline visual-studio-code-offline tor-browser-offline amnezia-vpn-offline)
-          pacman --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sp --noconfirm "${packages[@]}" > out/offline-resolution-urls.txt
+          .o11y/run-step.sh offline-resolution -- \
+            pacman --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db \
+              -Sp --noconfirm "${packages[@]}" > out/offline-resolution-urls.txt
           echo "Offline package graph resolves: ${#packages[@]} explicit targets"
 
       - name: Clone official CachyOS live ISO source
@@ -166,7 +235,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod -R a+rwX .
-          sudo -H -E -u builder ./buildiso.sh -p desktop -v -w
+          ../.o11y/run-step.sh mkarchiso -- sudo -H -E -u builder ./buildiso.sh -p desktop -v -w
 
       - name: Verify ISO contains the offline repository
         shell: bash
@@ -175,12 +244,36 @@ jobs:
           ISO=$(find cachyos-live/out -type f -name '*.iso' -print -quit)
           test -n "$ISO"
           sha256sum "$ISO" | tee out/ISO-SHA256SUMS
-          find cachyos-live/work -type f -name 'airootfs.sfs' -o -name '*.sfs' | head -n 1 > /tmp/sfs-path || true
           test -s .cache/pacman/pkg/cachyos-lxqt-offline.db.tar.zst
           echo "ISO=$ISO" >> "$GITHUB_ENV"
           du -h "$ISO" | tee out/iso-size.txt
 
+      - name: Report ISO build failure
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=python
+          if [ -x .o11y/.venv/bin/python ]; then PY=.o11y/.venv/bin/python; fi
+          "$PY" .o11y/report_failure.py --job build-iso
+
+      - name: Finalize ISO observability
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: bash .o11y/finalize.sh "${{ job.status }}"
+
+      - name: Upload CI diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o11y-iso-${{ github.run_id }}
+          path: .o11y/runtime/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upload ISO and provenance manifests
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: cachyos-lxqt-v4-offline-workstation

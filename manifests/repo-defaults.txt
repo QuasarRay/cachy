@@ -1,6 +1,6 @@
 # Packages intentionally installed by the custom CachyOS LXQt ISO.
-# Keep one pacman package/group per line. External vendor artifacts live in
-# manifests/external-artifacts.yml and are not resolved by pacman here.
+# Keep one pacman package/group per line. External vendor artifacts are built
+# separately and merged into the same local offline repository.
 
 # CachyOS complete recommended gaming ecosystem
 cachyos-gaming-meta
@@ -66,6 +66,37 @@ edk2-ovmf
 swtpm
 virtiofsd
 dnsmasq
+
+# PostgreSQL database and client development
+postgresql
+postgresql-libs
+
+# Ansible automation ecosystem
+ansible-core
+ansible
+ansible-lint
+ansible-runner
+ansible-navigator
+ansible-creator
+molecule
+yamllint
+python-pytest-testinfra
+yaml-language-server
+python-argcomplete
+python-dnspython
+python-jmespath
+python-netaddr
+python-passlib
+python-pywinrm
+python-systemd
+sshpass
+python-boto3
+python-kubernetes
+python-openstacksdk
+python-proxmoxer
+python-pynetbox
+python-pyopenssl
+python-paramiko
 
 # C / C++ / native development
 gcc
