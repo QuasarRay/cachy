@@ -48,11 +48,15 @@ for value in [
         pkgs.append(value)
 
 root = profile / "airootfs"
-cache_dst = root / "var/cache/pacman/pkg"
-cache_dst.mkdir(parents=True, exist_ok=True)
+# archiso's _cleanup_pacstrap_dir() intentionally deletes every file under
+# /var/cache/pacman/pkg before creating airootfs.sfs. The offline repository is
+# product data, not a transient package-manager cache, so embed it in a path
+# that survives that cleanup phase.
+repo_dst = root / "opt/cachyos-offline-repo"
+repo_dst.mkdir(parents=True, exist_ok=True)
 for src in cache.glob("*"):
     if src.is_file():
-        shutil.copy2(src, cache_dst / src.name)
+        shutil.copy2(src, repo_dst / src.name)
 
 pacman_offline = root / "etc/pacman-offline.conf"
 pacman_offline.parent.mkdir(parents=True, exist_ok=True)
@@ -60,12 +64,12 @@ pacman_offline.write_text("""[options]
 Architecture = x86_64 x86_64_v2 x86_64_v3 x86_64_v4
 SigLevel = Optional TrustAll
 LocalFileSigLevel = Optional
-CacheDir = /var/cache/pacman/pkg
+CacheDir = /opt/cachyos-offline-repo
 ParallelDownloads = 5
 
 [cachyos-lxqt-offline]
 SigLevel = Optional TrustAll
-Server = file:///var/cache/pacman/pkg
+Server = file:///opt/cachyos-offline-repo
 """)
 
 overlay_base = root / "usr/local/lib/cachyos-offline-overlay"
@@ -263,6 +267,6 @@ launcher.chmod(0o755)
 
 print(
     f"Prepared staged offline profile with {len(pkgs)} explicit install targets "
-    f"and {len(list(cache_dst.glob('*.pkg.tar.zst')))} cached package files "
-    f"from locked Calamares tree {calamares_root}"
+    f"and {len(list(repo_dst.glob('*.pkg.tar.zst')))} embedded repository package files "
+    f"at /opt/cachyos-offline-repo from locked Calamares tree {calamares_root}"
 )
