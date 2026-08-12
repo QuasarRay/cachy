@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/cache-offline-packages.yml'
+      - '.github/workflows/build-offline-iso.yml'
       - 'manifests/**'
       - 'scripts/**'
       - '.o11y/**'
