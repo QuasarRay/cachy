@@ -1,0 +1,157 @@
+name: Build Baseline External Offline Packages
+
+on:
+  push:
+    branches: [agent/iso-build-run]
+    paths:
+      - '.github/workflows/build-external-packages-baseline.yml'
+      - 'pipeline/tools/normalize_external_packages.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cachyos-external-packages-baseline
+  cancel-in-progress: false
+
+env:
+  AMNEZIA_SOURCE_RUN_ID: '31614038706'
+
+jobs:
+  build-external-packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: archlinux:base-devel
+    env:
+      BUILDEVENT_APIKEY: ${{ secrets.HONEYCOMB_API_KEY }}
+      BUILDEVENT_DATASET: ${{ secrets.HONEYCOMB_DATASET }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
+    steps:
+      - name: Checkout ISO specification
+        uses: actions/checkout@v4
+
+      - name: Bootstrap baseline x86_64 builder tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed \
+            python curl jq git sudo gnupg unzip libarchive
+          useradd -m builder || true
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+
+          bsdtar --version
+          rm -rf /tmp/bsdtar-smoke
+          mkdir -p /tmp/bsdtar-smoke/input
+          printf 'baseline-host-tool-smoke\n' > /tmp/bsdtar-smoke/input/value
+          bsdtar -cf /tmp/bsdtar-smoke/test.tar -C /tmp/bsdtar-smoke/input value
+          bsdtar -tf /tmp/bsdtar-smoke/test.tar | grep -Fxq value
+          printf 'host_machine=%s\n' "$(uname -m)"
+          pacman -Q libarchive
+
+      - name: Initialize observability
+        shell: bash
+        run: bash .o11y/setup.sh
+
+      - name: Reuse successful pinned Amnezia source-build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: amnezia-linux-source-built-locked
+          path: external/amnezia
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.AMNEZIA_SOURCE_RUN_ID }}
+
+      - name: Build raw external package outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          AMNEZIA_INSTALLER=$(find external/amnezia -type f -name 'AmneziaVPN_Linux_Installer.bin' -print -quit)
+          test -n "$AMNEZIA_INSTALLER"
+          mkdir -p external/raw external/evidence
+          sha256sum "$AMNEZIA_INSTALLER" | tee external/evidence/AMNEZIA-INSTALLER-SHA256
+
+          .o11y/run-step.sh external-package-build -- \
+            bash scripts/build-external-packages.sh external/raw "$AMNEZIA_INSTALLER"
+
+      - name: Normalize exact intended SoftwarePackage identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          .o11y/run-step.sh external-package-normalize -- \
+            python pipeline/tools/normalize_external_packages.py \
+              external/raw external/normalized
+
+          (
+            cd external/normalized
+            sha256sum --strict --quiet -c EXTERNAL-SHA256SUMS
+          )
+
+          package_count=$(find external/normalized -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)
+          test "$package_count" -eq 6
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('external/normalized/SOFTWARE-PACKAGES.json').read_text())
+          expected = {
+              'amnezia-vpn-offline',
+              'sing-box',
+              'tor-browser-offline',
+              'visual-studio-code-offline',
+              'windscribe-cli',
+              'xray-offline',
+          }
+          actual = {item['pkgname'] for item in manifest['packages']}
+          if actual != expected:
+              raise SystemExit(f'external identity mismatch: expected={sorted(expected)}, actual={sorted(actual)}')
+          if len(manifest['packages']) != len(expected):
+              raise SystemExit('duplicate external package identities remain after normalization')
+          print('Exact external SoftwarePackage identity set verified')
+          print('Ignored split debug packages:', len(manifest['ignored_split_debug_packages']))
+          PY
+
+          {
+            echo "package_count=$package_count"
+            echo "host_machine=$(uname -m)"
+            echo "host_libarchive=$(pacman -Q libarchive)"
+            echo "amnezia_source_run=$AMNEZIA_SOURCE_RUN_ID"
+          } | tee external/evidence/external-package-summary.txt
+
+      - name: Upload reusable normalized external package checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: external-offline-packages-baseline-clean
+          path: |
+            external/normalized/
+            external/evidence/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Report failure
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=python
+          if [ -x .o11y/.venv/bin/python ]; then PY=.o11y/.venv/bin/python; fi
+          "$PY" .o11y/report_failure.py --job baseline-external-packages-checkpoint
+
+      - name: Finalize observability
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: bash .o11y/finalize.sh "${{ job.status }}"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o11y-external-packages-checkpoint-${{ github.run_id }}
+          path: .o11y/runtime/
+          if-no-files-found: ignore
+          retention-days: 14
