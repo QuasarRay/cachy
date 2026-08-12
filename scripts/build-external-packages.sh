@@ -2,7 +2,7 @@
 set -euo pipefail
 
 OUT=${1:?output directory required}
-AMNEZIA_RUN=${2:?Amnezia .run path required}
+AMNEZIA_RUN=${2:?Amnezia installer path required}
 mkdir -p "$OUT"
 OUT=$(realpath "$OUT")
 AMNEZIA_RUN=$(realpath "$AMNEZIA_RUN")
@@ -12,6 +12,10 @@ trap 'rm -rf "$WORK"' EXIT
 if ! id builder >/dev/null 2>&1; then
   useradd -m builder
 fi
+
+# mktemp creates the parent as 0700/root. makepkg intentionally runs as the
+# unprivileged builder user, so it must be able to traverse this parent.
+chmod 0755 "$WORK"
 
 download_github_asset() {
   local repo=$1 jqexpr=$2 dest=$3
@@ -24,8 +28,17 @@ download_github_asset() {
 make_pkg() {
   local dir=$1
   chown -R builder:builder "$dir"
-  (cd "$dir" && sudo -u builder makepkg --noconfirm --clean --cleanbuild)
-  cp "$dir"/*.pkg.tar.zst "$OUT/"
+  install -d -m 0755 -o builder -g builder \
+    "$dir/src" "$dir/.build" "$dir/.pkgdest"
+  (
+    cd "$dir"
+    sudo -u builder env \
+      SRCDEST="$dir/src" \
+      BUILDDIR="$dir/.build" \
+      PKGDEST="$dir/.pkgdest" \
+      makepkg --noconfirm --clean --cleanbuild
+  )
+  cp "$dir/.pkgdest"/*.pkg.tar.zst "$OUT/"
 }
 
 # Windscribe: official upstream native Arch package.
