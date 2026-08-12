@@ -39,6 +39,11 @@ def parse_resolved_packages_tsv(text: str) -> tuple[Mapping[str, Any], ...]:
     for line_number, raw in enumerate(text.splitlines(), start=1):
         if not raw.strip():
             continue
+        if "\t" not in raw and "\\t" in raw:
+            raise ContractViolation(
+                f"resolved package record {line_number} contains literal \\t separators; "
+                "pacman --print-format must receive real tab characters"
+            )
         fields = raw.split("\t")
         if len(fields) != 5:
             raise ContractViolation(
