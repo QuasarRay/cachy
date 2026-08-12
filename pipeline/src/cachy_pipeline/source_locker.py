@@ -40,15 +40,14 @@ def _require_git_object_id(value: str) -> str:
 def _require_retrieval_uri(value: str) -> str:
     value = _require_text("retrieval_uri", value)
     parsed = urlparse(value)
-    # HTTPS/SSH/git URLs and scp-like Git remotes are supported. Local paths are
-    # intentionally not accepted by the public source-lock producer because they
-    # cannot be independently retrieved by downstream pipeline stages.
+    # Network-retrievable sources can be independently materialized by
+    # downstream stages. Local paths are intentionally forbidden.
     if parsed.scheme in {"https", "http", "ssh", "git"} and parsed.netloc:
         return value
     if re.fullmatch(r"[^@\s]+@[^:\s]+:.+", value):
         return value
     raise ContractViolation(
-        "retrieval_uri must be a network-retrievable Git URI (https/http/ssh/git or scp-like)"
+        "retrieval_uri must be a network-retrievable URI (https/http/ssh/git or scp-like)"
     )
 
 
@@ -71,6 +70,40 @@ def _ordered_source_lock(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {field: payload[field] for field in fields}
 
 
+def build_source_lock(
+    *,
+    source_name: str,
+    requested_ref: str,
+    resolved_commit_or_version: str,
+    content_digest: str,
+    retrieval_uri: str,
+    toolchain_digest: str,
+    retrieved_at: str,
+) -> Mapping[str, Any]:
+    """Produce the generic SourceLock contract for any immutable source.
+
+    `resolved_commit_or_version` may be a Git object ID, a release version or
+    another immutable upstream identifier. Byte/tree identity is independently
+    bound by `content_digest`, so downstream stages do not need to re-resolve a
+    moving selector such as a branch or `latest` release.
+    """
+
+    payload = {
+        "source_name": _require_text("source_name", source_name),
+        "requested_ref": _require_text("requested_ref", requested_ref),
+        "resolved_commit_or_version": _require_text(
+            "resolved_commit_or_version", resolved_commit_or_version
+        ),
+        "content_digest": _require_sha256("content_digest", content_digest),
+        "retrieval_uri": _require_retrieval_uri(retrieval_uri),
+        "toolchain_digest": _require_sha256("toolchain_digest", toolchain_digest),
+        "retrieved_at": _require_retrieved_at(retrieved_at),
+        "lock_schema_version": SOURCE_LOCK_SCHEMA_VERSION,
+    }
+    validate_contract_payload("SourceLock", payload)
+    return MappingProxyType(_ordered_source_lock(payload))
+
+
 def build_git_source_lock(
     *,
     source_name: str,
@@ -81,27 +114,17 @@ def build_git_source_lock(
     toolchain_digest: str,
     retrieved_at: str,
 ) -> Mapping[str, Any]:
-    """Produce the exact SourceLock contract for one Git source.
+    """Produce a SourceLock while enforcing Git-specific immutable identity."""
 
-    Validation that is specific to Git belongs here because source-locker owns
-    SourceLock invariants. Downstream components should consume this emitted
-    lock instead of re-resolving requested_ref.
-    """
-
-    payload = {
-        "source_name": _require_text("source_name", source_name),
-        "requested_ref": _require_text("requested_ref", requested_ref),
-        "resolved_commit_or_version": _require_git_object_id(
-            resolved_commit_or_version
-        ),
-        "content_digest": _require_sha256("content_digest", content_digest),
-        "retrieval_uri": _require_retrieval_uri(retrieval_uri),
-        "toolchain_digest": _require_sha256("toolchain_digest", toolchain_digest),
-        "retrieved_at": _require_retrieved_at(retrieved_at),
-        "lock_schema_version": SOURCE_LOCK_SCHEMA_VERSION,
-    }
-    validate_contract_payload("SourceLock", payload)
-    return MappingProxyType(_ordered_source_lock(payload))
+    return build_source_lock(
+        source_name=source_name,
+        requested_ref=requested_ref,
+        resolved_commit_or_version=_require_git_object_id(resolved_commit_or_version),
+        content_digest=content_digest,
+        retrieval_uri=retrieval_uri,
+        toolchain_digest=toolchain_digest,
+        retrieved_at=retrieved_at,
+    )
 
 
 def source_lock_json(payload: Mapping[str, Any]) -> str:
