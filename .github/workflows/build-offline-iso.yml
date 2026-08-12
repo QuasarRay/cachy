@@ -205,6 +205,7 @@ jobs:
           pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
           pacman-key --lsign-key F3B607488DB35A47
           sed -i '/^\[core\]$/i[cachyos]\nServer = https://mirror.cachyos.org/repo/$arch/$repo\n' /etc/pacman.conf
+          pacman -Sy --noconfirm
           pacman -S --noconfirm --needed \
             archiso cachyos-keyring mkinitcpio-archiso squashfs-tools grub \
             gnupg unzip libarchive
