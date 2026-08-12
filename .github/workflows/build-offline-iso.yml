@@ -224,6 +224,12 @@ jobs:
           cp external/packages/*.pkg.tar.zst .cache/pacman/pkg/
           rm -f .cache/pacman/pkg/cachyos-lxqt-offline.db* .cache/pacman/pkg/cachyos-lxqt-offline.files*
           repo-add .cache/pacman/pkg/cachyos-lxqt-offline.db.tar.zst .cache/pacman/pkg/*.pkg.tar.zst
+          # repo-add can inherit a future package mtime into generated metadata;
+          # pacman's file:// transfer then rejects it as "expected download size exceeded".
+          touch .cache/pacman/pkg/cachyos-lxqt-offline.db.tar.zst \
+                .cache/pacman/pkg/cachyos-lxqt-offline.files.tar.zst
+          touch -h .cache/pacman/pkg/cachyos-lxqt-offline.db \
+                   .cache/pacman/pkg/cachyos-lxqt-offline.files
           (cd .cache/pacman/pkg && sha256sum -- *.pkg.tar.zst | sort -k2 > SHA256SUMS)
 
       - name: Prove full requested package graph resolves with zero network repos
@@ -244,7 +250,7 @@ jobs:
           mkdir -p /tmp/offline-db/local /tmp/offline-db/sync
           pacman --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm
           mapfile -t packages < out/top-level-packages.txt
-          packages+=(windscribe sing-box xray-offline visual-studio-code-offline tor-browser-offline amnezia-vpn-offline)
+          packages+=(windscribe-cli sing-box xray-offline visual-studio-code-offline tor-browser-offline amnezia-vpn-offline)
           .o11y/run-step.sh offline-resolution -- \
             pacman --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db \
               -Sp --noconfirm "${packages[@]}" > out/offline-resolution-urls.txt
