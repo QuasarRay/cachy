@@ -5,10 +5,12 @@ on:
   push:
     paths:
       - 'pipeline/**'
+      - '.o11y/**'
       - '.github/workflows/validate-hybrid-pipeline.yml'
   pull_request:
     paths:
       - 'pipeline/**'
+      - '.o11y/**'
       - '.github/workflows/validate-hybrid-pipeline.yml'
 
 permissions:
@@ -18,10 +20,19 @@ jobs:
   contracts:
     name: Contract and boundary validation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
+    env:
+      BUILDEVENT_APIKEY: ${{ secrets.HONEYCOMB_API_KEY }}
+      BUILDEVENT_DATASET: ${{ secrets.HONEYCOMB_DATASET }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Initialize CI observability
+        shell: bash
+        run: bash .o11y/setup.sh
 
       - name: Validate through Dagger
         uses: dagger/dagger-for-github@v8.3.0
@@ -42,3 +53,35 @@ jobs:
             --source-name=cachyos-live-iso
             --retrieval-uri=https://github.com/CachyOS/CachyOS-Live-ISO.git
             --requested-ref=master
+
+      - name: Resolve real CachyOS v4 PackageClosure from locked Calamares source
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v dagger
+          .o11y/run-step.sh package-resolution -- \
+            dagger call -m ./pipeline check-current-package-resolution --source=.
+
+      - name: Report hybrid pipeline failure
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=python
+          if [ -x .o11y/.venv/bin/python ]; then PY=.o11y/.venv/bin/python; fi
+          "$PY" .o11y/report_failure.py --job hybrid-contracts
+
+      - name: Finalize hybrid observability
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: bash .o11y/finalize.sh "${{ job.status }}"
+
+      - name: Upload hybrid diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o11y-hybrid-${{ github.run_id }}
+          path: .o11y/runtime/
+          if-no-files-found: ignore
+          retention-days: 14
