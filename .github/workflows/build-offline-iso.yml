@@ -269,9 +269,27 @@ jobs:
           set -euo pipefail
           python scripts/prepare-offline-profile.py \
             cachyos-live/archiso .cache/pacman/pkg out/top-level-packages.txt
-          grep -q 'default: LXQT-Desktop' cachyos-live/archiso/airootfs/etc/calamares/modules/packagechooser_desktop.conf
-          ! grep -q 'pacman -Sy' cachyos-live/archiso/airootfs/usr/local/bin/calamares-online.sh
-          ! grep -q 'internet' cachyos-live/archiso/airootfs/etc/calamares/modules/welcome_online.conf
+
+          AIROOT=cachyos-live/archiso/airootfs
+          OVERLAY="$AIROOT/usr/local/lib/cachyos-offline-overlay/rootfs"
+          test -d "$OVERLAY"
+          test -x "$AIROOT/usr/local/lib/cachyos-offline-overlay/apply.sh"
+          test -s "$AIROOT/etc/pacman.d/hooks/00-cachyos-offline-overlay.hook"
+          grep -q 'default: LXQT-Desktop' "$OVERLAY/etc/calamares/modules/packagechooser_desktop.conf"
+          grep -Fq 'pacman -r "$newroot" -Sy --config=/etc/pacman.conf' \
+            "$OVERLAY/etc/calamares/scripts/pacstrap_calamares"
+          ! grep -Fq 'pacman --sysroot "$newroot"' \
+            "$OVERLAY/etc/calamares/scripts/pacstrap_calamares"
+          ! grep -q 'pacman -Sy' "$AIROOT/usr/local/bin/calamares-online.sh"
+          ! grep -q 'internet' "$OVERLAY/etc/calamares/modules/welcome_online.conf"
+
+          # Package-owned Calamares files must remain staged until pacman installs
+          # cachyos-calamares-next; pre-creating them causes mkarchiso conflicts.
+          test ! -e "$AIROOT/etc/calamares/modules/pacstrap.conf"
+          test ! -e "$AIROOT/etc/calamares/modules/packagechooser_desktop.conf"
+          test ! -e "$AIROOT/etc/calamares/modules/shellprocess-before-online.conf"
+          test ! -e "$AIROOT/etc/calamares/modules/welcome_online.conf"
+          test ! -e "$AIROOT/usr/share/calamares/settings_online.conf"
 
       - name: Build custom ISO
         shell: bash
