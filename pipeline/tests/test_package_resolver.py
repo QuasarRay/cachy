@@ -66,6 +66,15 @@ class PackageResolverTests(unittest.TestCase):
         self.assertEqual(records[0]["repository"], "cachyos-v4")
         self.assertEqual(records[0]["size_bytes"], 123456)
 
+    def test_resolved_package_parser_rejects_literal_backslash_t_separators(self) -> None:
+        malformed = (
+            r"linux-cachyos\t6.17.0-1\tcachyos-v4\t123456\t"
+            r"https://mirror.example/linux-cachyos.pkg.tar.zst"
+            "\n"
+        )
+        with self.assertRaisesRegex(ContractViolation, r"literal \\t separators"):
+            parse_resolved_packages_tsv(malformed)
+
     def test_resolved_package_parser_rejects_malformed_record(self) -> None:
         with self.assertRaisesRegex(ContractViolation, "5 tab-separated"):
             parse_resolved_packages_tsv("pkg\t1\tcore\n")
