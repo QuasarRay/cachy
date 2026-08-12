@@ -2,12 +2,12 @@ name: Cache CachyOS LXQt offline packages
 
 on:
   push:
-    branches: [main]
+    branches: [main, agent/iso-build-run]
     paths:
       - '.github/workflows/cache-offline-packages.yml'
-      - '.github/workflows/build-offline-iso.yml'
       - 'manifests/**'
       - 'scripts/**'
+      - 'pipeline/tools/collect_locked_installer_packages.py'
       - '.o11y/**'
   workflow_dispatch:
 
@@ -17,6 +17,7 @@ permissions:
 env:
   CACHE_DIR: .cache/pacman/pkg
   DB_DIR: .cache/pacman/db
+  CALAMARES_COMMIT: f1c20a500e14448e36991f1b9d3ebae153827761
 
 jobs:
   cache-packages:
@@ -32,6 +33,15 @@ jobs:
     steps:
       - name: Check out workspace
         uses: actions/checkout@v4
+
+      - name: Check out locked CachyOS Calamares source
+        uses: actions/checkout@v4
+        with:
+          repository: CachyOS/cachyos-calamares
+          ref: ${{ env.CALAMARES_COMMIT }}
+          path: locked-calamares
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Bootstrap Arch tools and CachyOS v4 repositories
         shell: bash
@@ -58,34 +68,55 @@ jobs:
         shell: bash
         run: bash .o11y/setup.sh
 
-      - name: Derive current installer package manifest
+      - name: Derive installer manifest from locked Calamares tree
         shell: bash
         run: |
           set -euo pipefail
-          .o11y/run-step.sh manifest-derivation -- python scripts/collect-installer-packages.py
+          test "$(git -C locked-calamares rev-parse HEAD)" = "$CALAMARES_COMMIT"
+          .o11y/run-step.sh manifest-derivation -- \
+            python pipeline/tools/collect_locked_installer_packages.py \
+              --calamares-root locked-calamares \
+              --repo-root . \
+              --output-dir out
           echo "Top-level package/group entries: $(wc -l < out/top-level-packages.txt)"
 
-      - name: Restore reusable package payloads
+      - name: Derive content-addressed package cache key
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_input_hash="$({
+            printf 'calamares=%s\n' "$CALAMARES_COMMIT"
+            sha256sum \
+              manifests/offline-extras.txt \
+              manifests/repo-defaults.txt \
+              pipeline/tools/collect_locked_installer_packages.py \
+              scripts/force-cachyos-v4.py | sort -k2
+          } | sha256sum | cut -d' ' -f1)"
+          echo "PACKAGE_CACHE_KEY=cachyos-lxqt-v4-${package_input_hash}" >> "$GITHUB_ENV"
+          echo "Package cache key: cachyos-lxqt-v4-${package_input_hash}"
+
+      - name: Restore exact package payload cache
         uses: actions/cache/restore@v4
         with:
           path: |
             .cache/pacman/pkg
             .cache/pacman/db
-          key: cachyos-lxqt-v4-${{ github.sha }}
-          restore-keys: |
-            cachyos-lxqt-v4-
+          key: ${{ env.PACKAGE_CACHE_KEY }}
 
       - name: Resolve full dependency closure against an empty target database
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$CACHE_DIR" "$DB_DIR/local" "$DB_DIR/sync"
+          rm -rf "$DB_DIR/local" "$DB_DIR/sync"
+          mkdir -p "$DB_DIR/local" "$DB_DIR/sync"
           pacman -Sy --noconfirm --dbpath "$DB_DIR"
           mapfile -t packages < out/top-level-packages.txt
           .o11y/run-step.sh package-resolution -- \
             pacman -Sp --noconfirm --dbpath "$DB_DIR" \
-              --print-format '%n\t%v\t%r\t%s\t%l' \
+              --print-format $'%n\t%v\t%r\t%s\t%l' \
               "${packages[@]}" > out/resolved-packages.tsv
+          test -s out/resolved-packages.tsv
           echo "Resolved package records: $(wc -l < out/resolved-packages.tsv)"
 
       - name: Download complete package closure
@@ -121,6 +152,8 @@ jobs:
             echo "cache_bytes=$(du -sb "$CACHE_DIR" | cut -f1)"
             echo "cache_human=$(du -sh "$CACHE_DIR" | cut -f1)"
             echo "source_sha=${GITHUB_SHA}"
+            echo "calamares_commit=${CALAMARES_COMMIT}"
+            echo "package_cache_key=${PACKAGE_CACHE_KEY}"
           } | tee out/cache-summary.txt
 
       - name: Save exact package cache for ISO job
@@ -129,12 +162,12 @@ jobs:
           path: |
             .cache/pacman/pkg
             .cache/pacman/db
-          key: cachyos-lxqt-v4-${{ github.sha }}
+          key: ${{ env.PACKAGE_CACHE_KEY }}
 
       - name: Upload review manifests
         uses: actions/upload-artifact@v4
         with:
-          name: cachyos-lxqt-package-manifests-v4
+          name: cachyos-lxqt-package-manifests-v4-${{ github.run_id }}
           path: out/
           if-no-files-found: error
           retention-days: 14
