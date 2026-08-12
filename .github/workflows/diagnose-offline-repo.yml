@@ -9,14 +9,20 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   diagnose-offline-repo:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     container:
       image: archlinux:base-devel
     steps:
+      - name: Checkout failing source revision
+        uses: actions/checkout@v4
+        with:
+          ref: e20499f7308fca75659a6e17f6b0e0f2b77cbf39
+
       - name: Restore exact cache from failed ISO run
         uses: actions/cache/restore@v4
         with:
@@ -26,20 +32,35 @@ jobs:
           key: cachyos-lxqt-v4-e20499f7308fca75659a6e17f6b0e0f2b77cbf39
           fail-on-cache-miss: true
 
-      - name: Inspect and reproduce local repository sync
+      - name: Download Amnezia artifact used by failed ISO run
+        uses: actions/download-artifact@v4
+        with:
+          name: amnezia-linux-source-built
+          path: external/amnezia
+          github-token: ${{ github.token }}
+          repository: QuasarRay/cachy
+          run-id: '31567267435'
+
+      - name: Install diagnostic build dependencies
         shell: bash
         run: |
-          set -u -o pipefail
+          set -euo pipefail
+          pacman -Sy --noconfirm
+          pacman -S --noconfirm --needed curl jq sudo gnupg unzip libarchive
+          useradd -m builder || true
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+
+      - name: Reproduce repository after external package injection
+        shell: bash
+        run: |
+          set -euo pipefail
           CACHE=$(realpath .cache/pacman/pkg)
           DB=cachyos-lxqt-offline
+          AMNEZIA_INSTALLER=$(find external/amnezia -type f -name 'AmneziaVPN_Linux_Installer.bin' -print -quit)
+          test -n "$AMNEZIA_INSTALLER"
 
-          echo '=== repository files ==='
-          ls -l "$CACHE/$DB.db" "$CACHE/$DB.db.tar.zst" || true
-          readlink -v "$CACHE/$DB.db" || true
-          stat -c '%A %U:%G %n' "$CACHE" "$CACHE/$DB.db" "$CACHE/$DB.db.tar.zst" || true
-          test -r "$CACHE/$DB.db.tar.zst"
-          bsdtar -tf "$CACHE/$DB.db.tar.zst" | head -n 5
-
+          echo '=== pristine cached repository sync ==='
           cat > /tmp/pacman-offline.conf <<EOF
           [options]
           Architecture = x86_64 x86_64_v2 x86_64_v3 x86_64_v4
@@ -49,34 +70,56 @@ jobs:
           SigLevel = Never
           Server = file://$CACHE
           EOF
+          rm -rf /tmp/offline-db
+          mkdir -p /tmp/offline-db/local /tmp/offline-db/sync
+          pacman --debug --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm
 
-          run_case() {
-            local name=$1
-            shift
-            rm -rf /tmp/offline-db
-            mkdir -p /tmp/offline-db/local /tmp/offline-db/sync
-            echo "=== $name ==="
-            set +e
-            "$@" 2>&1 | tee "/tmp/$name.log"
-            rc=${PIPESTATUS[0]}
-            set -e
-            echo "$name exit=$rc"
-            find /tmp/offline-db -maxdepth 3 -printf '%M %u:%g %p -> %l\n' | sort
-            return "$rc"
-          }
+          echo '=== build exact external package set ==='
+          bash scripts/build-external-packages.sh external/packages "$AMNEZIA_INSTALLER"
+          echo '=== external package metadata ==='
+          for f in external/packages/*.pkg.tar.zst; do
+            printf '%s: ' "$(basename "$f")"
+            bsdtar -xOf "$f" .PKGINFO | awk -F' = ' '$1=="pkgname"{n=$2} $1=="pkgver"{v=$2} $1=="arch"{a=$2} END{print "pkgname=" n, "pkgver=" v, "arch=" a}'
+          done
 
-          normal_rc=0
-          run_case normal pacman --debug --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm || normal_rc=$?
+          cp external/packages/*.pkg.tar.zst "$CACHE/"
+          rm -f "$CACHE/$DB.db"* "$CACHE/$DB.files"*
+          repo-add "$CACHE/$DB.db.tar.zst" "$CACHE"/*.pkg.tar.zst
 
-          sandbox_rc=0
-          run_case no-sandbox pacman --debug --disable-sandbox --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm || sandbox_rc=$?
+          echo '=== rebuilt repository files ==='
+          ls -l "$CACHE/$DB.db" "$CACHE/$DB.db.tar.zst" "$CACHE/$DB.files" "$CACHE/$DB.files.tar.zst" || true
+          readlink -v "$CACHE/$DB.db" || true
+          readlink -v "$CACHE/$DB.files" || true
+          stat -c '%A %U:%G %s %n' "$CACHE/$DB.db" "$CACHE/$DB.db.tar.zst" || true
+          bsdtar -tf "$CACHE/$DB.db.tar.zst" | head -n 10
 
-          echo "RESULT normal=$normal_rc no_sandbox=$sandbox_rc"
-
-          # Also prove the database itself is parseable independent of the transfer path.
+          echo '=== direct parse rebuilt repository ==='
           rm -rf /tmp/offline-db
           mkdir -p /tmp/offline-db/local /tmp/offline-db/sync
           cp "$CACHE/$DB.db.tar.zst" "/tmp/offline-db/sync/$DB.db"
           pacman --debug --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sl "$DB" >/tmp/direct-db-list.txt
-          test -s /tmp/direct-db-list.txt
-          echo "direct_db_parse=success packages=$(wc -l < /tmp/direct-db-list.txt)"
+          echo "direct_db_parse packages=$(wc -l < /tmp/direct-db-list.txt)"
+
+          echo '=== synchronize rebuilt repository using file URL ==='
+          rm -rf /tmp/offline-db
+          mkdir -p /tmp/offline-db/local /tmp/offline-db/sync
+          set +e
+          pacman --debug --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm 2>&1 | tee /tmp/rebuilt-sync.log
+          sync_rc=${PIPESTATUS[0]}
+          set -e
+          echo "rebuilt_sync_exit=$sync_rc"
+          ls -la /tmp/offline-db/sync
+          if (( sync_rc != 0 )); then
+            exit "$sync_rc"
+          fi
+
+          echo '=== resolve production target set ==='
+          python scripts/collect-installer-packages.py
+          mapfile -t packages < out/top-level-packages.txt
+          packages+=(windscribe sing-box xray-offline visual-studio-code-offline tor-browser-offline amnezia-vpn-offline)
+          set +e
+          pacman --debug --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sp --noconfirm "${packages[@]}" 2>&1 | tee /tmp/rebuilt-resolution.log
+          resolve_rc=${PIPESTATUS[0]}
+          set -e
+          echo "rebuilt_resolution_exit=$resolve_rc"
+          exit "$resolve_rc"
