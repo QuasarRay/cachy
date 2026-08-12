@@ -5,6 +5,7 @@ on:
     branches: [agent/pipeline-hardening]
     paths:
       - '.github/workflows/test-hardened-iso-validator.yml'
+      - 'scripts/verify-offline-iso.sh'
   workflow_dispatch:
 
 permissions:
