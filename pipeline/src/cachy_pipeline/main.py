@@ -121,8 +121,10 @@ class CachyPipeline:
     async def _package_closure_from_lock(
         self,
         source: dagger.Directory,
+        product_spec: Mapping[str, Any] | str,
         calamares_source_lock: Mapping[str, Any] | str,
     ) -> Mapping[str, Any]:
+        product = validate_contract_payload("ProductSpec", product_spec)
         lock = validate_contract_payload("SourceLock", calamares_source_lock)
         locked = lock.payload
         if locked["source_name"] != "cachyos-calamares":
@@ -219,7 +221,7 @@ uname -m > /out/architecture.txt
         }
 
         return build_package_closure(
-            product_spec=default_product_spec(),
+            product_spec=product.payload,
             calamares_source_lock=locked,
             explicit_requested_packages=requested,
             resolved_packages_tsv=resolved_tsv,
@@ -228,14 +230,33 @@ uname -m > /out/architecture.txt
         )
 
     @function
+    async def resolve_package_closure(
+        self,
+        source: dagger.Directory,
+        product_spec: str,
+        calamares_source_lock: str,
+    ) -> str:
+        """Resolve PackageClosure from the explicit ProductSpec + SourceLock boundary."""
+        closure = await self._package_closure_from_lock(
+            source,
+            product_spec,
+            calamares_source_lock,
+        )
+        return package_closure_json(closure)
+
+    @function
     async def resolve_current_package_closure(self, source: dagger.Directory) -> str:
-        """Resolve the real CachyOS v4 package closure from immutable Calamares input."""
+        """Resolve the current product using a freshly materialized Calamares SourceLock."""
         calamares_lock = await _resolve_git_source_lock(
             "cachyos-calamares",
             _CALAMARES_URI,
             _CALAMARES_REF,
         )
-        closure = await self._package_closure_from_lock(source, calamares_lock)
+        closure = await self._package_closure_from_lock(
+            source,
+            default_product_spec(),
+            calamares_lock,
+        )
         return package_closure_json(closure)
 
     @function
@@ -246,7 +267,11 @@ uname -m > /out/architecture.txt
             _CALAMARES_URI,
             _CALAMARES_REF,
         )
-        closure = await self._package_closure_from_lock(source, calamares_lock)
+        closure = await self._package_closure_from_lock(
+            source,
+            default_product_spec(),
+            calamares_lock,
+        )
         validated = validate_contract_payload("PackageClosure", closure)
         evidence = closure["resolution evidence"]
         return json.dumps(
