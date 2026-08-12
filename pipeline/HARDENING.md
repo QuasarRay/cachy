@@ -8,23 +8,37 @@ This document records concrete failure modes discovered while moving the CachyOS
 
 **Required fix:** Repository Factory must materialize every package referenced by `PackageClosure`, verify the downloaded identity/version, hash the actual bytes, build repository metadata only from that exact set, and emit a `RepoSnapshot`. Downstream image construction must consume the snapshot rather than query public mirrors.
 
+**Hardening branch:** `repository_factory.py` now defines fail-closed `RepoSnapshot` metadata construction that rejects stale, duplicate and missing closure payloads, binds actual package SHA-256s, repository indexes, `SoftwarePackage` digests and zero-network resolution evidence into the snapshot digest.
+
 ## P0 — restored package caches may contain historical payloads
 
 The legacy cache workflow previously used a broad restore prefix and then ran `repo-add` across every `*.pkg.tar.zst` present in the restored directory. Old packages that are no longer in the current closure can therefore become part of the offline repository.
 
 **Required fix:** never build repository metadata directly over a mutable cache directory. Stage a clean snapshot directory containing exactly the verified closure payloads and approved `SoftwarePackage` artifacts. Reject unexpected or missing payloads.
 
-## P0 — image source and installer source were moving refs
+**Build-run mitigation:** the active build uses a content-derived exact cache key with no broad restore prefix and validates `SHA256SUMS` before consuming the cache.
 
-The legacy workflows fetched the current Calamares branch and the current CachyOS live-ISO `master` branch during each run.
+## P0 — image and installer sources contained moving refs
 
-**Build-run mitigation:** the active validation build pins the already-validated Calamares commit and will pin the already-validated live-ISO commit. Long-term, Image Factory must accept only `SourceLock` artifacts.
+The legacy workflows fetched the current Calamares branch and the current CachyOS live-ISO `master` branch during each run. A second moving-source path was found inside `prepare-offline-profile.py`: it fetched the pacstrap wrapper and desktop chooser from `raw.githubusercontent.com/.../cachyos` while constructing the supposedly locked overlay.
 
-## P0 — build-local ISO verification is insufficient
+**Build-run mitigation:** the active validation build pins the already-validated Calamares and live-ISO commits.
+
+**Hardening branch:** `prepare-offline-profile.py` now requires the locked Calamares tree as an input and reads both patched files from that tree. A hermetic regression test executes the builder against a synthetic locked tree and asserts that no network-fetch API remains.
+
+Long-term, Image Factory and Installer Overlay must accept only `SourceLock`/adapter artifacts.
+
+## P0 — build-local ISO verification was insufficient
 
 A legacy step named as if it verified the ISO repository actually checked files in the runner cache rather than proving that the produced ISO contained those bytes.
 
-**Required fix:** certification must run from the finished ISO artifact on a fresh runner. It must mount/extract the ISO and root filesystem, validate the embedded repository database and package hashes, verify Calamares offline configuration, and eventually perform a no-NIC installation/boot smoke test.
+**Required fix:** certification must run from the finished ISO artifact on a fresh runner. It must extract the ISO and root filesystem, validate the embedded repository database and package hashes, verify Calamares offline configuration, and eventually perform a no-NIC installation/boot smoke test.
+
+## P0 — independent validator depended on loop mounting
+
+The first real independent-validator run downloaded a finished 3.0 GiB ISO successfully but exited immediately after entering `verify-offline-iso.sh`, before any repository/Calamares evidence was emitted. The validator's first artifact operation was a privileged loop mount, coupling certification to hosted-runner kernel/device policy.
+
+**Hardening branch:** the validator now extracts `arch/x86_64/airootfs.sfs` from ISO9660 with `bsdtar` in userspace and then applies `unsquashfs` to the extracted image. A regression test forbids reintroducing loop-mount/losetup dependence.
 
 ## P1 — `PackageClosure` does not yet prove package bytes
 
@@ -34,7 +48,9 @@ Names, versions, repositories, sizes and URLs are resolution evidence, not immut
 
 ## P1 — external software builders are not first-class hybrid stages
 
-Windscribe, sing-box, Xray, VS Code, Tor Browser and Amnezia are currently built by the legacy workflow. They should be independent `SoftwarePackage` producers carrying their `SourceLock`, build-recipe digest, resource budget, tests, SBOM/provenance and payload digest.
+Windscribe, sing-box, Xray, VS Code and Tor Browser are currently selected through moving release channels inside the legacy builder; Amnezia alone is pinned to a specific source release. A build can therefore change external payloads even when ProductSpec and Git sources do not.
+
+**Required fix:** each external input becomes a `SourceLock` first, then an independent `SoftwarePackage` producer carrying that lock, build-recipe digest, `ResourceBudget`, tests, SBOM/provenance and payload digest. `SourceLock` has been generalized on the hardening branch so `resolved_commit_or_version` can represent an immutable release version while Git producers retain stricter object-ID validation.
 
 ## P1 — mutable runner/container toolchains
 
@@ -46,17 +62,21 @@ Windscribe, sing-box, Xray, VS Code, Tor Browser and Amnezia are currently built
 
 The offline package closure, external packages, archiso work tree and final ISO coexist on the runner. A late disk exhaustion wastes the most expensive part of the build.
 
-**Required fix:** before external builds and before `mkarchiso`, record `df -B1`, estimate required headroom from RepoSnapshot size, and fail early if the budget is insufficient. This belongs to explicit `ResourceBudget`/failure evidence rather than a magic workflow constant.
+**Build-run mitigation:** the active locked build records cache size/free space and requires free bytes to exceed twice the repository payload plus 8 GiB before invoking `mkarchiso`.
+
+**Required hybrid fix:** express this as `ResourceBudget`/failure evidence rather than a workflow-local constant.
 
 ## P1 — transient network failures lack bounded stage policy
 
-Keyserver access and mirror downloads can fail transiently even when inputs are valid. Retrying whole workflows is expensive and obscures whether failure is environmental or semantic.
+Keyserver access and mirror/release downloads can fail transiently even when inputs are valid. Retrying whole workflows is expensive and obscures whether failure is environmental or semantic.
 
 **Required fix:** classify network-only operations and give them bounded retry/backoff. Never retry checksum, contract, source-lock, repository-integrity or offline-certification failures as if they were transient.
 
 ## P2 — build provenance is fragmented
 
 Useful evidence exists across logs and several manifest files but there is no single candidate manifest joining all immutable inputs and outputs.
+
+**Build-run mitigation:** the locked build records its repository commit, Calamares commit, live-ISO commit, exact package cache key, toolchain evidence and final ISO SHA-256 as artifacts.
 
 **Required fix:** Image Factory should emit one provenance record containing ProductSpec digest, all SourceLock digests, PackageClosure digest, RepoSnapshot digest, SoftwarePackage digests, InstallerOverlay digest, image toolchain versions, ISO SHA-256 and candidate digest.
 
