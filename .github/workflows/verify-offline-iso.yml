@@ -1,0 +1,72 @@
+name: Validate built CachyOS Offline ISO
+
+on:
+  workflow_run:
+    workflows: ["Build CachyOS LXQt Offline Workstation ISO"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build workflow run ID whose ISO artifact should be validated"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cachyos-offline-iso-validation-${{ github.event.workflow_run.id || inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  validate-finished-iso:
+    name: Validate package bytes and offline installer inside ISO
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SOURCE_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+
+    steps:
+      - name: Checkout validator at build revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Download candidate ISO artifact from build run
+        uses: actions/download-artifact@v4
+        with:
+          name: cachyos-lxqt-v4-offline-workstation
+          path: candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+
+      - name: Install artifact inspection tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools zstd util-linux
+          df -h /
+
+      - name: Validate finished ISO, embedded repository, and Calamares state
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISO=$(find candidate -type f -name '*.iso' -print -quit)
+          test -n "$ISO"
+          mkdir -p verified
+          sha256sum "$ISO" | tee verified/ISO-SHA256SUMS
+          du -h "$ISO" | tee verified/iso-size.txt
+          sudo bash scripts/verify-offline-iso.sh "$ISO" | tee verified/offline-iso-validation.log
+
+      - name: Upload independent validation report
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-lxqt-v4-offline-workstation-verification-${{ env.SOURCE_RUN_ID }}
+          path: verified/
+          if-no-files-found: error
+          retention-days: 14
