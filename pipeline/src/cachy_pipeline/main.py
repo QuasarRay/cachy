@@ -38,7 +38,7 @@ class CachyPipeline:
         """Run the contract/drift test suite in a hermetic container."""
         return await (
             dag.container()
-            .from_("python:3.13-slim")
+            .from_("python:3.14-slim")
             .with_directory("/repo", source)
             .with_workdir("/repo")
             .with_env_variable("PYTHONPATH", "/repo/pipeline/src")
