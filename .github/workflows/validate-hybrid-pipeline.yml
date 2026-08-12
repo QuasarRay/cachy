@@ -30,3 +30,15 @@ jobs:
           verb: call
           module: ./pipeline
           args: check-contracts --source=.
+
+      - name: Prove SourceLock producer through Dagger
+        uses: dagger/dagger-for-github@v8.3.0
+        with:
+          version: '0.21.8'
+          verb: call
+          module: ./pipeline
+          args: >-
+            lock-git-source
+            --source-name=cachy-pipeline-validation
+            --retrieval-uri=https://github.com/QuasarRay/cachy.git
+            --requested-ref=${{ github.sha }}
