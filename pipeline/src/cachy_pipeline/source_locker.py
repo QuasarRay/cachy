@@ -40,9 +40,6 @@ def _require_git_object_id(value: str) -> str:
 def _require_retrieval_uri(value: str) -> str:
     value = _require_text("retrieval_uri", value)
     parsed = urlparse(value)
-    # HTTPS/SSH/git URLs and scp-like Git remotes are supported. Local paths are
-    # intentionally not accepted by the public source-lock producer because they
-    # cannot be independently retrieved by downstream pipeline stages.
     if parsed.scheme in {"https", "http", "ssh", "git"} and parsed.netloc:
         return value
     if re.fullmatch(r"[^@\s]+@[^:\s]+:.+", value):
@@ -65,6 +62,17 @@ def _require_retrieved_at(value: str) -> str:
     return value
 
 
+def validate_git_source_request(
+    *, source_name: str, requested_ref: str, retrieval_uri: str
+) -> tuple[str, str, str]:
+    source_name = _require_text("source_name", source_name)
+    requested_ref = _require_text("requested_ref", requested_ref)
+    if requested_ref.startswith("-"):
+        raise ContractViolation("requested_ref must not begin with '-' for Git resolution")
+    retrieval_uri = _require_retrieval_uri(retrieval_uri)
+    return source_name, requested_ref, retrieval_uri
+
+
 def build_git_source_lock(
     *,
     source_name: str,
@@ -75,21 +83,19 @@ def build_git_source_lock(
     toolchain_digest: str,
     retrieved_at: str,
 ) -> Mapping[str, Any]:
-    """Produce the exact SourceLock contract for one Git source.
+    """Produce the exact SourceLock contract for one Git source."""
 
-    Validation that is specific to Git belongs here because source-locker owns
-    SourceLock invariants. Downstream components should consume this emitted
-    lock instead of re-resolving requested_ref.
-    """
-
+    source_name, requested_ref, retrieval_uri = validate_git_source_request(
+        source_name=source_name,
+        requested_ref=requested_ref,
+        retrieval_uri=retrieval_uri,
+    )
     payload = {
-        "source_name": _require_text("source_name", source_name),
-        "requested_ref": _require_text("requested_ref", requested_ref),
-        "resolved_commit_or_version": _require_git_object_id(
-            resolved_commit_or_version
-        ),
+        "source_name": source_name,
+        "requested_ref": requested_ref,
+        "resolved_commit_or_version": _require_git_object_id(resolved_commit_or_version),
         "content_digest": _require_sha256("content_digest", content_digest),
-        "retrieval_uri": _require_retrieval_uri(retrieval_uri),
+        "retrieval_uri": retrieval_uri,
         "toolchain_digest": _require_sha256("toolchain_digest", toolchain_digest),
         "retrieved_at": _require_retrieved_at(retrieved_at),
         "lock_schema_version": SOURCE_LOCK_SCHEMA_VERSION,
