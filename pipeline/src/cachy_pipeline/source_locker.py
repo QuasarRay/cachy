@@ -7,7 +7,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
-from .contracts import ContractViolation, validate_contract_payload
+from .contracts import ContractViolation, contract_registry, validate_contract_payload
 
 SOURCE_LOCK_SCHEMA_VERSION = "1"
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -65,6 +65,12 @@ def _require_retrieved_at(value: str) -> str:
     return value
 
 
+def _ordered_source_lock(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return SourceLock in the frozen cross-candidate contract field order."""
+    fields = contract_registry()["SourceLock"]
+    return {field: payload[field] for field in fields}
+
+
 def build_git_source_lock(
     *,
     source_name: str,
@@ -94,13 +100,13 @@ def build_git_source_lock(
         "retrieved_at": _require_retrieved_at(retrieved_at),
         "lock_schema_version": SOURCE_LOCK_SCHEMA_VERSION,
     }
-    artifact = validate_contract_payload("SourceLock", payload)
-    return MappingProxyType(dict(artifact.payload))
+    validate_contract_payload("SourceLock", payload)
+    return MappingProxyType(_ordered_source_lock(payload))
 
 
 def source_lock_json(payload: Mapping[str, Any]) -> str:
-    artifact = validate_contract_payload("SourceLock", payload)
-    return json.dumps(dict(artifact.payload), indent=2, ensure_ascii=False) + "\n"
+    validate_contract_payload("SourceLock", payload)
+    return json.dumps(_ordered_source_lock(payload), indent=2, ensure_ascii=False) + "\n"
 
 
 def parse_git_resolution_evidence(stdout: str) -> Mapping[str, str]:
