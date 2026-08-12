@@ -31,7 +31,7 @@ if (
         "PROFILE, CACHE, TOP_LEVEL_MANIFEST and the locked Calamares source tree must exist"
     )
 
-pkgs = []
+pkgs: list[str] = []
 for raw in manifest.read_text().splitlines():
     value = raw.split("#", 1)[0].strip()
     if value and value not in pkgs:
@@ -48,26 +48,27 @@ for value in [
         pkgs.append(value)
 
 root = profile / "airootfs"
-cache_dst = root / "var/cache/pacman/pkg"
-cache_dst.mkdir(parents=True, exist_ok=True)
+# archiso deletes /var/cache/pacman/pkg before creating airootfs.sfs. The
+# offline repository is product data rather than transient package cache, so
+# embed it under /opt where that cleanup phase does not remove it.
+repo_dst = root / "opt/cachyos-offline-repo"
+repo_dst.mkdir(parents=True, exist_ok=True)
 for src in cache.glob("*"):
     if src.is_file():
-        shutil.copy2(src, cache_dst / src.name)
+        shutil.copy2(src, repo_dst / src.name)
 
-# This configuration is activated only by our launcher immediately before
-# Calamares. mkarchiso itself continues using the normal online build config.
 pacman_offline = root / "etc/pacman-offline.conf"
 pacman_offline.parent.mkdir(parents=True, exist_ok=True)
 pacman_offline.write_text("""[options]
 Architecture = x86_64 x86_64_v2 x86_64_v3 x86_64_v4
 SigLevel = Optional TrustAll
 LocalFileSigLevel = Optional
-CacheDir = /var/cache/pacman/pkg
+CacheDir = /opt/cachyos-offline-repo
 ParallelDownloads = 5
 
 [cachyos-lxqt-offline]
 SigLevel = Optional TrustAll
-Server = file:///var/cache/pacman/pkg
+Server = file:///opt/cachyos-offline-repo
 """)
 
 # Files owned by cachyos-calamares-next cannot exist at their final paths when
@@ -117,8 +118,8 @@ i18n:
   name: "Preparing local offline package installation"
 """)
 
-# Read the wrapper from the exact locked Calamares tree. No network access or
-# moving branch is permitted at overlay-construction time.
+# Read installer patches from the exact locked Calamares tree. No moving
+# branch or network access is permitted at overlay-construction time.
 pacstrap_wrapper_text = pacstrap_wrapper_source.read_text()
 old_pacman_call = 'if ! pacman --sysroot "$newroot" -Sy "${pacman_args[@]}"; then'
 new_pacman_call = 'if ! pacman -r "$newroot" -Sy --config=/etc/pacman.conf "${pacman_args[@]}"; then'
@@ -278,6 +279,6 @@ launcher.chmod(0o755)
 
 print(
     f"Prepared staged offline profile with {len(pkgs)} explicit install targets "
-    f"and {len(list(cache_dst.glob('*.pkg.tar.zst')))} cached package files "
-    f"from locked Calamares tree {calamares_root}"
+    f"and {len(list(repo_dst.glob('*.pkg.tar.zst')))} embedded repository package files "
+    f"at /opt/cachyos-offline-repo from locked Calamares tree {calamares_root}"
 )
