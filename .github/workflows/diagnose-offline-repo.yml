@@ -1,0 +1,82 @@
+name: Diagnose CachyOS offline repository
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/diagnose-offline-repo.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose-offline-repo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Restore exact cache from failed ISO run
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/pacman/pkg
+            .cache/pacman/db
+          key: cachyos-lxqt-v4-e20499f7308fca75659a6e17f6b0e0f2b77cbf39
+          fail-on-cache-miss: true
+
+      - name: Inspect and reproduce local repository sync
+        shell: bash
+        run: |
+          set -u -o pipefail
+          CACHE=$(realpath .cache/pacman/pkg)
+          DB=cachyos-lxqt-offline
+
+          echo '=== repository files ==='
+          ls -l "$CACHE/$DB.db" "$CACHE/$DB.db.tar.zst" || true
+          readlink -v "$CACHE/$DB.db" || true
+          stat -c '%A %U:%G %n' "$CACHE" "$CACHE/$DB.db" "$CACHE/$DB.db.tar.zst" || true
+          test -r "$CACHE/$DB.db.tar.zst"
+          bsdtar -tf "$CACHE/$DB.db.tar.zst" | head -n 5
+
+          cat > /tmp/pacman-offline.conf <<EOF
+          [options]
+          Architecture = x86_64 x86_64_v2 x86_64_v3 x86_64_v4
+          SigLevel = Never
+          CacheDir = $CACHE
+          [$DB]
+          SigLevel = Never
+          Server = file://$CACHE
+          EOF
+
+          run_case() {
+            local name=$1
+            shift
+            rm -rf /tmp/offline-db
+            mkdir -p /tmp/offline-db/local /tmp/offline-db/sync
+            echo "=== $name ==="
+            set +e
+            "$@" 2>&1 | tee "/tmp/$name.log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            echo "$name exit=$rc"
+            find /tmp/offline-db -maxdepth 3 -printf '%M %u:%g %p -> %l\n' | sort
+            return "$rc"
+          }
+
+          normal_rc=0
+          run_case normal pacman --debug --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm || normal_rc=$?
+
+          sandbox_rc=0
+          run_case no-sandbox pacman --debug --disable-sandbox --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm || sandbox_rc=$?
+
+          echo "RESULT normal=$normal_rc no_sandbox=$sandbox_rc"
+
+          # Also prove the database itself is parseable independent of the transfer path.
+          rm -rf /tmp/offline-db
+          mkdir -p /tmp/offline-db/local /tmp/offline-db/sync
+          cp "$CACHE/$DB.db.tar.zst" "/tmp/offline-db/sync/$DB.db"
+          pacman --debug --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sl "$DB" >/tmp/direct-db-list.txt
+          test -s /tmp/direct-db-list.txt
+          echo "direct_db_parse=success packages=$(wc -l < /tmp/direct-db-list.txt)"
