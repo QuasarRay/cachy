@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
-from .contracts import ContractViolation, canonical_digest, contract_registry, validate_contract_payload
+from .contracts import ContractViolation, contract_registry, validate_contract_payload
 
 
 def _ordered(contract_name: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -90,6 +90,19 @@ def build_package_closure(
     requested = parse_requested_packages(explicit_requested_packages)
     records = parse_resolved_packages_tsv(resolved_packages_tsv)
 
+    resolver_architecture = resolver_tool_version.get("architecture")
+    if resolver_architecture != "x86_64":
+        raise ContractViolation(
+            "x86_64-v4 package resolution must execute in an x86_64 resolver; "
+            f"got {resolver_architecture!r}"
+        )
+    repository_policy = resolver_tool_version.get("repository_policy")
+    if repository_policy != "cachyos-v4":
+        raise ContractViolation(
+            "x86_64-v4 PackageClosure requires the cachyos-v4 repository policy; "
+            f"got {repository_policy!r}"
+        )
+
     resolved_dependencies = [
         {"name": record["name"], "version": record["version"]}
         for record in records
@@ -102,7 +115,8 @@ def build_package_closure(
         "repository origin/version for each package": origins,
         "architecture compatibility": {
             "target": architecture_target,
-            "resolver_architecture": resolver_tool_version.get("architecture"),
+            "resolver_architecture": resolver_architecture,
+            "repository_policy": repository_policy,
             "compatible": True,
         },
         "resolver/tool version": dict(resolver_tool_version),
@@ -125,7 +139,7 @@ def package_closure_json(payload: Mapping[str, Any]) -> str:
 
 
 def default_product_spec() -> Mapping[str, Any]:
-    """Current reviewed semantics for the CachyOS LXQt v4 offline workstation."""
+    """Current build semantics for the CachyOS LXQt v4 offline workstation."""
     payload = {
         "identity / edition": "cachyos-lxqt-v4-offline-workstation",
         "architecture policy": {
