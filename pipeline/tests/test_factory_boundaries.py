@@ -49,6 +49,35 @@ class FactoryBoundaryTests(unittest.TestCase):
             }
             self.assertEqual({"build"}, public_callables, factory.__name__)
 
+    def test_factory_dependency_topology_matches_the_hybrid_architecture(self) -> None:
+        software = get_type_hints(SoftwareFactory.build)
+        repository = get_type_hints(RepositoryFactory.build)
+        installer = get_type_hints(InstallerOverlayFactory.build)
+        image = get_type_hints(ImageAssembler.build)
+
+        self.assertEqual(
+            {"self", "product_spec", "source_locks", "resource_budget", "return"},
+            set(inspect.signature(SoftwareFactory.build).parameters) | {"return"},
+        )
+        self.assertEqual(
+            {"self", "package_closure", "software_packages", "return"},
+            set(inspect.signature(RepositoryFactory.build).parameters) | {"return"},
+        )
+        self.assertEqual(
+            {"self", "product_spec", "adapter_certification", "return"},
+            set(inspect.signature(InstallerOverlayFactory.build).parameters) | {"return"},
+        )
+        self.assertEqual(
+            {"self", "source_lock", "repo_snapshot", "installer_overlay", "return"},
+            set(inspect.signature(ImageAssembler.build).parameters) | {"return"},
+        )
+
+        # The overlay path is independent of repository assembly until ImageAssembler joins them.
+        self.assertNotIn("repo_snapshot", installer)
+        self.assertNotIn("software_packages", installer)
+        self.assertIn("repo_snapshot", image)
+        self.assertIn("installer_overlay", image)
+
     def test_factory_build_annotations_are_contract_types_not_dict_results(self) -> None:
         for factory in (
             SoftwareFactory,

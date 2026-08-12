@@ -15,10 +15,10 @@ The Python contract classes normalize punctuation into valid identifiers but pre
 The only pipeline factory interfaces introduced in this slice are:
 
 ```text
-SoftwareFactory
-  -> RepositoryFactory
-  -> InstallerOverlayFactory
-  -> ImageAssembler
+SoftwareFactory -> RepositoryFactory ----\
+                                        -> ImageAssembler
+InstallerOverlayFactory -----------------/
+SourceLock ------------------------------/
 ```
 
 They produce/consume only cross-candidate contract types. Factory implementations will migrate existing build logic incrementally; GitHub Actions remains untouched until equivalent Dagger paths exist.
