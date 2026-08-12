@@ -28,12 +28,10 @@ download_github_asset() {
 make_pkg() {
   local dir=$1
   chown -R builder:builder "$dir"
-  install -d -m 0755 -o builder -g builder \
-    "$dir/src" "$dir/.build" "$dir/.pkgdest"
+  install -d -m 0755 -o builder -g builder "$dir/.build" "$dir/.pkgdest"
   (
     cd "$dir"
     sudo -u builder env \
-      SRCDEST="$dir/src" \
       BUILDDIR="$dir/.build" \
       PKGDEST="$dir/.pkgdest" \
       makepkg --noconfirm --clean --cleanbuild
@@ -48,11 +46,11 @@ download_github_asset Windscribe/Desktop-App '.assets[] | select(.name|endswith(
 download_github_asset SagerNet/sing-box '.assets[] | select(.name|test("linux_x86_64.*pkg.tar.zst$")) | .browser_download_url' "$OUT/sing-box.pkg.tar.zst"
 
 # Xray: wrap official release archive as a local Arch package.
-XR="$WORK/xray"; mkdir -p "$XR/src"
+XR="$WORK/xray"; mkdir -p "$XR"
 XR_JSON=$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest)
 XR_VER=$(jq -r .tag_name <<<"$XR_JSON" | sed 's/^v//')
 XR_URL=$(jq -r '.assets[] | select(.name=="Xray-linux-64.zip") | .browser_download_url' <<<"$XR_JSON")
-curl -fL --retry 5 "$XR_URL" -o "$XR/src/xray.zip"
+curl -fL --retry 5 "$XR_URL" -o "$XR/xray.zip"
 cat > "$XR/PKGBUILD" <<EOF
 pkgname=xray-offline
 pkgver=${XR_VER//-/_}
@@ -62,9 +60,8 @@ arch=('x86_64')
 url='https://github.com/XTLS/Xray-core'
 license=('MPL-2.0')
 source=('xray.zip')
-sha256sums=('$(sha256sum "$XR/src/xray.zip" | cut -d' ' -f1)')
+sha256sums=('$(sha256sum "$XR/xray.zip" | cut -d' ' -f1)')
 package() {
-  bsdtar -xf xray.zip
   install -Dm755 xray "\$pkgdir/usr/bin/xray"
   install -d "\$pkgdir/usr/share/xray" "\$pkgdir/etc/xray"
   test ! -f geoip.dat || install -Dm644 geoip.dat "\$pkgdir/usr/share/xray/geoip.dat"
@@ -87,9 +84,9 @@ EOF
 make_pkg "$XR"
 
 # Microsoft Visual Studio Code: official stable Linux binary distribution.
-VC="$WORK/vscode"; mkdir -p "$VC/src"
+VC="$WORK/vscode"; mkdir -p "$VC"
 VC_VER=$(curl -fsSL https://update.code.visualstudio.com/api/releases/stable | jq -r '.[0]')
-curl -fL --retry 5 "https://update.code.visualstudio.com/${VC_VER}/linux-x64/stable" -o "$VC/src/vscode.tar.gz"
+curl -fL --retry 5 "https://update.code.visualstudio.com/${VC_VER}/linux-x64/stable" -o "$VC/vscode.tar.gz"
 cat > "$VC/PKGBUILD" <<EOF
 pkgname=visual-studio-code-offline
 pkgver=${VC_VER//-/_}
@@ -99,7 +96,7 @@ arch=('x86_64')
 url='https://code.visualstudio.com/'
 license=('custom')
 source=('vscode.tar.gz')
-sha256sums=('$(sha256sum "$VC/src/vscode.tar.gz" | cut -d' ' -f1)')
+sha256sums=('$(sha256sum "$VC/vscode.tar.gz" | cut -d' ' -f1)')
 options=('!strip')
 package() {
   install -d "\$pkgdir/opt/visual-studio-code" "\$pkgdir/usr/bin" "\$pkgdir/usr/share/applications"
@@ -121,16 +118,16 @@ EOF
 make_pkg "$VC"
 
 # Tor Browser: official stable Linux archive, OpenPGP verified before packaging.
-TB="$WORK/torbrowser"; mkdir -p "$TB/src"
+TB="$WORK/torbrowser"; mkdir -p "$TB"
 TB_JSON=$(curl -fsSL https://aus1.torproject.org/torbrowser/update_3/release/download-linux-x86_64.json)
 TB_VER=$(jq -r .version <<<"$TB_JSON")
 TB_URL=$(jq -r .binary <<<"$TB_JSON")
 TB_SIG=$(jq -r .sig <<<"$TB_JSON")
-curl -fL --retry 5 "$TB_URL" -o "$TB/src/tor-browser.tar.xz"
-curl -fL --retry 5 "$TB_SIG" -o "$TB/src/tor-browser.tar.xz.asc"
+curl -fL --retry 5 "$TB_URL" -o "$TB/tor-browser.tar.xz"
+curl -fL --retry 5 "$TB_SIG" -o "$TB/tor-browser.tar.xz.asc"
 GNUPGHOME="$WORK/gnupg"; export GNUPGHOME; mkdir -m700 "$GNUPGHOME"
 gpg --batch --auto-key-locate nodefault,wkd --locate-keys torbrowser@torproject.org
-gpg --batch --verify "$TB/src/tor-browser.tar.xz.asc" "$TB/src/tor-browser.tar.xz"
+gpg --batch --verify "$TB/tor-browser.tar.xz.asc" "$TB/tor-browser.tar.xz"
 cat > "$TB/PKGBUILD" <<EOF
 pkgname=tor-browser-offline
 pkgver=${TB_VER//-/_}
@@ -140,7 +137,7 @@ arch=('x86_64')
 url='https://www.torproject.org/'
 license=('MPL-2.0')
 source=('tor-browser.tar.xz')
-sha256sums=('$(sha256sum "$TB/src/tor-browser.tar.xz" | cut -d' ' -f1)')
+sha256sums=('$(sha256sum "$TB/tor-browser.tar.xz" | cut -d' ' -f1)')
 options=('!strip')
 package() {
   install -d "\$pkgdir/opt/tor-browser" "\$pkgdir/usr/share/applications"
@@ -160,7 +157,7 @@ make_pkg "$TB"
 
 # Amnezia: package the official source-built Qt IFW installer and perform the
 # local installation automatically on first boot. No network is needed.
-AM="$WORK/amnezia"; mkdir -p "$AM/src"; cp "$AMNEZIA_RUN" "$AM/src/AmneziaVPN.run"; chmod +x "$AM/src/AmneziaVPN.run"
+AM="$WORK/amnezia"; mkdir -p "$AM"; cp "$AMNEZIA_RUN" "$AM/AmneziaVPN.run"; chmod +x "$AM/AmneziaVPN.run"
 cat > "$AM/PKGBUILD" <<EOF
 pkgname=amnezia-vpn-offline
 pkgver=4.8.21.0
@@ -170,7 +167,7 @@ arch=('x86_64')
 url='https://github.com/amnezia-vpn/amnezia-client'
 license=('GPL-3.0-only')
 source=('AmneziaVPN.run')
-sha256sums=('$(sha256sum "$AM/src/AmneziaVPN.run" | cut -d' ' -f1)')
+sha256sums=('$(sha256sum "$AM/AmneziaVPN.run" | cut -d' ' -f1)')
 options=('!strip')
 package() {
   install -Dm755 AmneziaVPN.run "\$pkgdir/usr/lib/amnezia-offline/AmneziaVPN.run"
