@@ -18,11 +18,19 @@ The legacy cache workflow previously used a broad restore prefix and then ran `r
 
 **Build-run mitigation:** the active build uses a content-derived exact cache key with no broad restore prefix and validates `SHA256SUMS` before consuming the cache.
 
+## P0 — target ISA leaked into host-executed build tools
+
+The first locked build enabled CachyOS x86-64-v4 repositories in the build container itself. That upgraded host-executed tools such as `libarchive` to v4 binaries. GitHub's hosted CPU did not satisfy that ISA, so Xray extraction died with `Illegal instruction` even though the final product is intentionally x86-64-v4.
+
+**Required fix:** target architecture and host execution architecture are distinct contracts. The runner/tool container must remain baseline x86_64 unless host capability is explicitly certified. Only target package bytes and the image profile may use CachyOS v4 repositories.
+
+**Hardening branch:** `resource_gate.py` now rejects v4 repositories in the host repository inventory while requiring v4 repositories in the x86-64-v4 target inventory. `ResourceBudget` is also explicit and tested.
+
 ## P0 — image and installer sources contained moving refs
 
 The legacy workflows fetched the current Calamares branch and the current CachyOS live-ISO `master` branch during each run. A second moving-source path was found inside `prepare-offline-profile.py`: it fetched the pacstrap wrapper and desktop chooser from `raw.githubusercontent.com/.../cachyos` while constructing the supposedly locked overlay.
 
-**Build-run mitigation:** the active validation build pins the already-validated Calamares and live-ISO commits.
+**Build-run mitigation:** the active validation build pins the already-validated Calamares and live-ISO commits. The live-ISO helper that fetched a mirrorlist from moving `CachyOS-PKGBUILDS/master` is patched to consume the locally installed versioned mirrorlist instead.
 
 **Hardening branch:** `prepare-offline-profile.py` now requires the locked Calamares tree as an input and reads both patched files from that tree. A hermetic regression test executes the builder against a synthetic locked tree and asserts that no network-fetch API remains.
 
@@ -34,11 +42,13 @@ A legacy step named as if it verified the ISO repository actually checked files 
 
 **Required fix:** certification must run from the finished ISO artifact on a fresh runner. It must extract the ISO and root filesystem, validate the embedded repository database and package hashes, verify Calamares offline configuration, and eventually perform a no-NIC installation/boot smoke test.
 
+**Confirmed historical defect:** the hardened fresh-runner validator successfully extracted the previous 3.0 GiB ISO and proved that `/var/cache/pacman/pkg` did not contain the expected offline repository database. The old green build was therefore a real false green, not merely a validator incompatibility.
+
 ## P0 — independent validator depended on loop mounting
 
 The first real independent-validator run downloaded a finished 3.0 GiB ISO successfully but exited immediately after entering `verify-offline-iso.sh`, before any repository/Calamares evidence was emitted. The validator's first artifact operation was a privileged loop mount, coupling certification to hosted-runner kernel/device policy.
 
-**Hardening branch:** the validator now extracts `arch/x86_64/airootfs.sfs` from ISO9660 with `bsdtar` in userspace and then applies `unsquashfs` to the extracted image. A regression test forbids reintroducing loop-mount/losetup dependence.
+**Hardening branch:** the validator now extracts `arch/x86_64/airootfs.sfs` from ISO9660 with `bsdtar` in userspace and then applies `unsquashfs` to the extracted image. A regression test forbids reintroducing loop-mount/losetup dependence. Cleanup is also fail-safe so SquashFS-restored permissions cannot replace the real validation error with a trap failure.
 
 ## P1 — `PackageClosure` does not yet prove package bytes
 
@@ -52,6 +62,12 @@ Windscribe, sing-box, Xray, VS Code and Tor Browser are currently selected throu
 
 **Required fix:** each external input becomes a `SourceLock` first, then an independent `SoftwarePackage` producer carrying that lock, build-recipe digest, `ResourceBudget`, tests, SBOM/provenance and payload digest. `SourceLock` has been generalized on the hardening branch so `resolved_commit_or_version` can represent an immutable release version while Git producers retain stricter object-ID validation.
 
+## P1 — package builders published incidental split outputs
+
+Arch `makepkg` produced the intended `xray-offline` package plus `xray-offline-debug`. The legacy builder copied `*.pkg.tar.zst` wholesale, so an incidental split package crossed the artifact boundary and caused a seven-file output where the product specification requires six external package identities.
+
+**Required fix:** Software Package Builder output is selected by parsed `.PKGINFO` identity, never wildcard filenames or file count. Split debug artifacts can be retained as diagnostics, but they are not promoted into `RepoSnapshot` unless explicitly requested by ProductSpec. The build-run branch now normalizes package outputs to the exact six intended `pkgname` values and emits a SHA-256/package manifest checkpoint.
+
 ## P1 — mutable runner/container toolchains
 
 `archlinux:latest`, live Arch repositories, GitHub runner images, and unrecorded `mkarchiso` versions can change between builds.
@@ -64,13 +80,19 @@ The offline package closure, external packages, archiso work tree and final ISO 
 
 **Build-run mitigation:** the active locked build records cache size/free space and requires free bytes to exceed twice the repository payload plus 8 GiB before invoking `mkarchiso`.
 
-**Required hybrid fix:** express this as `ResourceBudget`/failure evidence rather than a workflow-local constant.
+**Hardening branch:** `ResourceBudget` now carries explicit CPU, memory, disk, timeout and retry-class policy rather than relying only on workflow-local constants.
 
 ## P1 — transient network failures lack bounded stage policy
 
 Keyserver access and mirror/release downloads can fail transiently even when inputs are valid. Retrying whole workflows is expensive and obscures whether failure is environmental or semantic.
 
 **Required fix:** classify network-only operations and give them bounded retry/backoff. Never retry checksum, contract, source-lock, repository-integrity or offline-certification failures as if they were transient.
+
+## P1 — successful expensive stages were not reusable checkpoints
+
+The first locked run successfully built Amnezia before a later external-package failure. A monolithic retry would have rebuilt it unnecessarily. The same problem applies to the 5+ GiB repository payload and, eventually, completed SoftwarePackage sets.
+
+**Required fix:** every expensive immutable boundary should emit a content-verified artifact that a downstream retry can consume independently. Amnezia and the normalized external-package set are now treated as checkpoints in the build-run branch; the long-term equivalents are `SoftwarePackage` and `RepoSnapshot` artifacts.
 
 ## P2 — build provenance is fragmented
 
