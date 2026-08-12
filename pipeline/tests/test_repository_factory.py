@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import pytest
+import unittest
 
 from cachy_pipeline.contracts import ContractViolation, canonical_digest, contract_registry
 from cachy_pipeline.package_resolver import build_package_closure, default_product_spec
@@ -84,65 +84,68 @@ def _snapshot(**overrides):
     return build_repo_snapshot(**arguments)
 
 
-def test_repo_snapshot_uses_exact_contract_order_and_self_digest():
-    snapshot = _snapshot()
-    assert tuple(snapshot) == contract_registry()["RepoSnapshot"]
+class RepoSnapshotTests(unittest.TestCase):
+    def test_repo_snapshot_uses_exact_contract_order_and_self_digest(self):
+        snapshot = _snapshot()
+        self.assertEqual(tuple(snapshot), contract_registry()["RepoSnapshot"])
 
-    without_digest = {
-        field: snapshot[field]
-        for field in contract_registry()["RepoSnapshot"]
-        if field != "snapshot digest"
-    }
-    assert snapshot["snapshot digest"] == canonical_digest(without_digest)
-
-
-def test_repo_snapshot_manifest_covers_payloads_and_repository_indexes():
-    snapshot = _snapshot()
-    manifest = snapshot["SHA-256 manifest"]
-    assert [entry["filename"] for entry in manifest] == [
-        "alpha-1.0-1-x86_64.pkg.tar.zst",
-        "beta-2.0-1-x86_64.pkg.tar.zst",
-        "cachyos-lxqt-offline.db",
-        "cachyos-lxqt-offline.files",
-    ]
-
-
-def test_repo_snapshot_rejects_stale_payload_not_in_closure():
-    payloads = _payloads()
-    payloads.append(
-        {
-            "name": "stale",
-            "version": "9-1",
-            "repository": "extra",
-            "filename": "stale-9-1-x86_64.pkg.tar.zst",
-            "size_bytes": 1,
-            "sha256": "sha256:" + "e" * 64,
-            "object_ref": "dagger://repo/stale",
+        without_digest = {
+            field: snapshot[field]
+            for field in contract_registry()["RepoSnapshot"]
+            if field != "snapshot digest"
         }
-    )
-    with pytest.raises(ContractViolation, match="not part of PackageClosure"):
-        _snapshot(package_payloads=payloads)
+        self.assertEqual(snapshot["snapshot digest"], canonical_digest(without_digest))
 
-
-def test_repo_snapshot_rejects_missing_closure_payload():
-    with pytest.raises(ContractViolation, match="missing 1 PackageClosure payload"):
-        _snapshot(package_payloads=_payloads()[:1])
-
-
-def test_repo_snapshot_requires_network_forbidden_offline_evidence():
-    with pytest.raises(ContractViolation, match="must forbid network access"):
-        _snapshot(
-            offline_resolution_evidence={
-                "network_forbidden": False,
-                "resolved_package_count": 2,
-                "missing_packages": [],
-            }
+    def test_repo_snapshot_manifest_covers_payloads_and_repository_indexes(self):
+        snapshot = _snapshot()
+        manifest = snapshot["SHA-256 manifest"]
+        self.assertEqual(
+            [entry["filename"] for entry in manifest],
+            [
+                "alpha-1.0-1-x86_64.pkg.tar.zst",
+                "beta-2.0-1-x86_64.pkg.tar.zst",
+                "cachyos-lxqt-offline.db",
+                "cachyos-lxqt-offline.files",
+            ],
         )
 
+    def test_repo_snapshot_rejects_stale_payload_not_in_closure(self):
+        payloads = _payloads()
+        payloads.append(
+            {
+                "name": "stale",
+                "version": "9-1",
+                "repository": "extra",
+                "filename": "stale-9-1-x86_64.pkg.tar.zst",
+                "size_bytes": 1,
+                "sha256": "sha256:" + "e" * 64,
+                "object_ref": "dagger://repo/stale",
+            }
+        )
+        with self.assertRaisesRegex(ContractViolation, "not part of PackageClosure"):
+            _snapshot(package_payloads=payloads)
 
-def test_repo_snapshot_digest_changes_when_verified_package_bytes_change():
-    first = _snapshot()
-    changed_payloads = _payloads()
-    changed_payloads[0]["sha256"] = "sha256:" + "f" * 64
-    second = _snapshot(package_payloads=changed_payloads)
-    assert first["snapshot digest"] != second["snapshot digest"]
+    def test_repo_snapshot_rejects_missing_closure_payload(self):
+        with self.assertRaisesRegex(ContractViolation, "missing 1 PackageClosure payload"):
+            _snapshot(package_payloads=_payloads()[:1])
+
+    def test_repo_snapshot_requires_network_forbidden_offline_evidence(self):
+        with self.assertRaisesRegex(ContractViolation, "must forbid network access"):
+            _snapshot(
+                offline_resolution_evidence={
+                    "network_forbidden": False,
+                    "resolved_package_count": 2,
+                    "missing_packages": [],
+                }
+            )
+
+    def test_repo_snapshot_digest_changes_when_verified_package_bytes_change(self):
+        first = _snapshot()
+        changed_payloads = _payloads()
+        changed_payloads[0]["sha256"] = "sha256:" + "f" * 64
+        second = _snapshot(package_payloads=changed_payloads)
+        self.assertNotEqual(first["snapshot digest"], second["snapshot digest"])
+
+
+if __name__ == "__main__":
+    unittest.main()
