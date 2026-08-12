@@ -45,10 +45,17 @@ SigLevel = Optional TrustAll
 Server = file:///var/cache/pacman/pkg
 """)
 
+# Files owned by cachyos-calamares-next cannot exist at their final paths when
+# mkarchiso asks pacman to install that package. Stage every package-owned
+# override under a private non-owned tree and apply it from a post-transaction
+# pacman hook after the live-system package transaction has completed.
+overlay_base = root / "usr/local/lib/cachyos-offline-overlay"
+overlay_root = overlay_base / "rootfs"
+module_dir = overlay_root / "etc/calamares/modules"
+module_dir.mkdir(parents=True, exist_ok=True)
+
 # All selected software is installed by pacstrap from the local repo. This
 # removes the need for Calamares' later online package-update module.
-module_dir = root / "etc/calamares/modules"
-module_dir.mkdir(parents=True, exist_ok=True)
 pacstrap = ["---", "basePackages:"] + [f"  - {p}" for p in pkgs] + [
     "postInstallFiles:",
     '  - "/etc/mkinitcpio.conf"',
@@ -101,7 +108,7 @@ new_pacman_call = 'if ! pacman -r "$newroot" -Sy --config=/etc/pacman.conf "${pa
 if pacstrap_wrapper_text.count(old_pacman_call) != 1:
     raise SystemExit("CachyOS pacstrap wrapper changed; refusing to build without revalidating offline semantics")
 pacstrap_wrapper_text = pacstrap_wrapper_text.replace(old_pacman_call, new_pacman_call, 1)
-pacstrap_wrapper = root / "etc/calamares/scripts/pacstrap_calamares"
+pacstrap_wrapper = overlay_root / "etc/calamares/scripts/pacstrap_calamares"
 pacstrap_wrapper.parent.mkdir(parents=True, exist_ok=True)
 pacstrap_wrapper.write_text(pacstrap_wrapper_text)
 pacstrap_wrapper.chmod(0o755)
@@ -192,7 +199,7 @@ disable-cancel-during-exec: false
 hide-back-and-next-during-exec: true
 quit-at-end: false
 """
-share = root / "usr/share/calamares"
+share = overlay_root / "usr/share/calamares"
 share.mkdir(parents=True, exist_ok=True)
 (share / "settings_online.conf").write_text(settings)
 
@@ -202,6 +209,34 @@ chooser_src = "https://raw.githubusercontent.com/CachyOS/cachyos-calamares/cachy
 chooser = urllib.request.urlopen(chooser_src, timeout=60).read().decode()
 chooser = chooser.replace("default: KDE-Desktop", "default: LXQT-Desktop")
 (module_dir / "packagechooser_desktop.conf").write_text(chooser)
+
+apply_overlay = overlay_base / "apply.sh"
+apply_overlay.parent.mkdir(parents=True, exist_ok=True)
+apply_overlay.write_text("""#!/bin/bash
+set -euo pipefail
+src=/usr/local/lib/cachyos-offline-overlay/rootfs
+test -d "$src"
+cp -a "$src"/. /
+rm -f /etc/pacman.d/hooks/00-cachyos-offline-overlay.hook
+rm -rf /usr/local/lib/cachyos-offline-overlay
+""")
+apply_overlay.chmod(0o755)
+
+hook = root / "etc/pacman.d/hooks/00-cachyos-offline-overlay.hook"
+hook.parent.mkdir(parents=True, exist_ok=True)
+hook.write_text("""[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = cachyos-calamares-next
+
+[Action]
+Description = Apply CachyOS zero-network Calamares overlay after package installation
+When = PostTransaction
+Depends = bash
+Depends = coreutils
+Exec = /usr/local/lib/cachyos-offline-overlay/apply.sh
+""")
 
 launcher = root / "usr/local/bin/calamares-online.sh"
 launcher.parent.mkdir(parents=True, exist_ok=True)
@@ -217,4 +252,4 @@ exec pkexec-wrapper calamares -D6 >>"$log" 2>&1
 """)
 launcher.chmod(0o755)
 
-print(f"Prepared offline profile with {len(pkgs)} explicit install targets and {len(list(cache_dst.glob('*.pkg.tar.zst')))} cached package files")
+print(f"Prepared staged offline profile with {len(pkgs)} explicit install targets and {len(list(cache_dst.glob('*.pkg.tar.zst')))} cached package files")
