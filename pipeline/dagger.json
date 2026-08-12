@@ -2,5 +2,5 @@
   "name": "cachy-pipeline",
   "engineVersion": "v0.21.8",
   "sdk": "python",
-  "source": "src"
+  "source": "."
 }
