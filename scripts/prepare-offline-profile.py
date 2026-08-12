@@ -3,22 +3,47 @@ from __future__ import annotations
 
 import shutil
 import sys
-import urllib.request
 from pathlib import Path
+
+if len(sys.argv) != 5:
+    raise SystemExit(
+        "usage: prepare-offline-profile.py PROFILE CACHE TOP_LEVEL_MANIFEST LOCKED_CALAMARES_ROOT"
+    )
 
 profile = Path(sys.argv[1]).resolve()
 cache = Path(sys.argv[2]).resolve()
 manifest = Path(sys.argv[3]).resolve()
+calamares_root = Path(sys.argv[4]).resolve()
 
-if not profile.is_dir() or not cache.is_dir() or not manifest.is_file():
-    raise SystemExit("usage: prepare-offline-profile.py PROFILE CACHE TOP_LEVEL_MANIFEST")
+pacstrap_wrapper_source = calamares_root / "src/scripts/pacstrap_calamares"
+desktop_chooser_source = (
+    calamares_root / "src/modules/packagechooser/packagechooser_desktop.conf"
+)
+if (
+    not profile.is_dir()
+    or not cache.is_dir()
+    or not manifest.is_file()
+    or not calamares_root.is_dir()
+    or not pacstrap_wrapper_source.is_file()
+    or not desktop_chooser_source.is_file()
+):
+    raise SystemExit(
+        "PROFILE, CACHE, TOP_LEVEL_MANIFEST and the locked Calamares source tree must exist"
+    )
 
 pkgs = []
 for raw in manifest.read_text().splitlines():
     value = raw.split("#", 1)[0].strip()
     if value and value not in pkgs:
         pkgs.append(value)
-for value in ["windscribe-cli", "sing-box", "xray-offline", "visual-studio-code-offline", "tor-browser-offline", "amnezia-vpn-offline"]:
+for value in [
+    "windscribe-cli",
+    "sing-box",
+    "xray-offline",
+    "visual-studio-code-offline",
+    "tor-browser-offline",
+    "amnezia-vpn-offline",
+]:
     if value not in pkgs:
         pkgs.append(value)
 
@@ -92,22 +117,18 @@ i18n:
   name: "Preparing local offline package installation"
 """)
 
-# CachyOS currently invokes pacman with --sysroot in its Calamares pacstrap
-# wrapper. --sysroot relocates config paths and file:// repositories into the
-# target root, which defeats this ISO's host-resident offline repository. Patch
-# only that invocation back to the host-config/root-install model used by Arch's
-# pacstrap: packages and repo metadata come exclusively from the live ISO cache,
-# while files and the target package database are written below the target root.
-pacstrap_wrapper_url = (
-    "https://raw.githubusercontent.com/CachyOS/cachyos-calamares/"
-    "cachyos/src/scripts/pacstrap_calamares"
-)
-pacstrap_wrapper_text = urllib.request.urlopen(pacstrap_wrapper_url, timeout=60).read().decode()
+# Read the wrapper from the exact locked Calamares tree. No network access or
+# moving branch is permitted at overlay-construction time.
+pacstrap_wrapper_text = pacstrap_wrapper_source.read_text()
 old_pacman_call = 'if ! pacman --sysroot "$newroot" -Sy "${pacman_args[@]}"; then'
 new_pacman_call = 'if ! pacman -r "$newroot" -Sy --config=/etc/pacman.conf "${pacman_args[@]}"; then'
 if pacstrap_wrapper_text.count(old_pacman_call) != 1:
-    raise SystemExit("CachyOS pacstrap wrapper changed; refusing to build without revalidating offline semantics")
-pacstrap_wrapper_text = pacstrap_wrapper_text.replace(old_pacman_call, new_pacman_call, 1)
+    raise SystemExit(
+        "locked CachyOS pacstrap wrapper changed; refusing to build without revalidating offline semantics"
+    )
+pacstrap_wrapper_text = pacstrap_wrapper_text.replace(
+    old_pacman_call, new_pacman_call, 1
+)
 pacstrap_wrapper = overlay_root / "etc/calamares/scripts/pacstrap_calamares"
 pacstrap_wrapper.parent.mkdir(parents=True, exist_ok=True)
 pacstrap_wrapper.write_text(pacstrap_wrapper_text)
@@ -205,9 +226,12 @@ share.mkdir(parents=True, exist_ok=True)
 
 # Default the still-visible desktop chooser to LXQt; all packages are already
 # fixed in pacstrap, but the choice is used by display-manager configuration.
-chooser_src = "https://raw.githubusercontent.com/CachyOS/cachyos-calamares/cachyos/src/modules/packagechooser/packagechooser_desktop.conf"
-chooser = urllib.request.urlopen(chooser_src, timeout=60).read().decode()
-chooser = chooser.replace("default: KDE-Desktop", "default: LXQT-Desktop")
+chooser = desktop_chooser_source.read_text()
+if chooser.count("default: KDE-Desktop") != 1:
+    raise SystemExit(
+        "locked desktop chooser no longer has exactly one KDE default; refusing an ambiguous patch"
+    )
+chooser = chooser.replace("default: KDE-Desktop", "default: LXQT-Desktop", 1)
 (module_dir / "packagechooser_desktop.conf").write_text(chooser)
 
 apply_overlay = overlay_base / "apply.sh"
@@ -252,4 +276,8 @@ exec pkexec-wrapper calamares -D6 >>"$log" 2>&1
 """)
 launcher.chmod(0o755)
 
-print(f"Prepared staged offline profile with {len(pkgs)} explicit install targets and {len(list(cache_dst.glob('*.pkg.tar.zst')))} cached package files")
+print(
+    f"Prepared staged offline profile with {len(pkgs)} explicit install targets "
+    f"and {len(list(cache_dst.glob('*.pkg.tar.zst')))} cached package files "
+    f"from locked Calamares tree {calamares_root}"
+)
