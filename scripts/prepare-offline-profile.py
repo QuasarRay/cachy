@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import urllib.request
 from pathlib import Path
 
 profile = Path(sys.argv[1]).resolve()
@@ -83,6 +84,29 @@ script:
 i18n:
   name: "Preparing local offline package installation"
 """)
+
+# CachyOS currently invokes pacman with --sysroot in its Calamares pacstrap
+# wrapper. --sysroot relocates config paths and file:// repositories into the
+# target root, which defeats this ISO's host-resident offline repository. Patch
+# only that invocation back to the host-config/root-install model used by Arch's
+# pacstrap: packages and repo metadata come exclusively from the live ISO cache,
+# while files and the target package database are written below the target root.
+pacstrap_wrapper_url = (
+    "https://raw.githubusercontent.com/CachyOS/cachyos-calamares/"
+    "cachyos/src/scripts/pacstrap_calamares"
+)
+pacstrap_wrapper_text = urllib.request.urlopen(pacstrap_wrapper_url, timeout=60).read().decode()
+old_pacman_call = 'if ! pacman --sysroot "$newroot" -Sy "${pacman_args[@]}"; then'
+new_pacman_call = 'if ! pacman -r "$newroot" -Sy --config=/etc/pacman.conf "${pacman_args[@]}"; then'
+if pacstrap_wrapper_text.count(old_pacman_call) != 1:
+    raise SystemExit("CachyOS pacstrap wrapper changed; refusing to build without revalidating offline semantics")
+pacstrap_wrapper_text = pacstrap_wrapper_text.replace(old_pacman_call, new_pacman_call, 1)
+pacstrap_wrapper = root / "etc/calamares/scripts/pacstrap_calamares"
+pacstrap_wrapper.parent.mkdir(parents=True, exist_ok=True)
+pacstrap_wrapper.write_text(pacstrap_wrapper_text)
+pacstrap_wrapper.chmod(0o755)
+if old_pacman_call in pacstrap_wrapper_text or new_pacman_call not in pacstrap_wrapper_text:
+    raise SystemExit("failed to enforce host-only offline pacstrap semantics")
 
 # packages@online and mirror-ranking/key-refresh are intentionally absent.
 settings = """---
@@ -175,7 +199,6 @@ share.mkdir(parents=True, exist_ok=True)
 # Default the still-visible desktop chooser to LXQt; all packages are already
 # fixed in pacstrap, but the choice is used by display-manager configuration.
 chooser_src = "https://raw.githubusercontent.com/CachyOS/cachyos-calamares/cachyos/src/modules/packagechooser/packagechooser_desktop.conf"
-import urllib.request
 chooser = urllib.request.urlopen(chooser_src, timeout=60).read().decode()
 chooser = chooser.replace("default: KDE-Desktop", "default: LXQT-Desktop")
 (module_dir / "packagechooser_desktop.conf").write_text(chooser)
