@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "source_run_id": 31616472561,
+  "source_commit": "ab33343e9f66dabc8b830694e4359547b675c684",
+  "artifact": {
+    "id": 9149475734,
+    "name": "external-offline-packages-baseline-clean",
+    "archive_digest": "sha256:a0bf7012c2e0d54d44e9e4a75d0754cb23cc235acc1e06711fb689a0d886ea84",
+    "size_bytes": 672208055,
+    "expires_at": "2026-08-26T16:14:40Z"
+  },
+  "amnezia_source": {
+    "release": "4.8.21.0",
+    "source_build_run_id": 31614038706,
+    "installer_sha256": "b5bc3ad2d0336deea8b527ec171f4d2aadd533703552254c65a58bcae302fc48"
+  },
+  "software_packages": [
+    {"pkgname": "windscribe-cli", "pkgver": "2.23.12-1"},
+    {"pkgname": "sing-box", "pkgver": "1.13.18-1"},
+    {"pkgname": "xray-offline", "pkgver": "26.3.27-1"},
+    {"pkgname": "visual-studio-code-offline", "pkgver": "1.133.0-1"},
+    {"pkgname": "tor-browser-offline", "pkgver": "15.0.19-1"},
+    {"pkgname": "amnezia-vpn-offline", "pkgver": "4.8.21.0-1"}
+  ],
+  "normalization": {
+    "expected_package_count": 6,
+    "identity_source": ".PKGINFO",
+    "ignored_incidental_outputs": ["*-debug"],
+    "checkpoint_contains_per_package_sha256_manifest": true
+  }
+}
