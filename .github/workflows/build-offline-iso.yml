@@ -236,7 +236,7 @@ jobs:
           Architecture = x86_64 x86_64_v2 x86_64_v3 x86_64_v4
           SigLevel = Never
           CacheDir = $CACHE
-          [cachyos-offline]
+          [cachyos-lxqt-offline]
           SigLevel = Never
           Server = file://$CACHE
           EOF
