@@ -1,0 +1,450 @@
+name: Assemble Locked CachyOS LXQt Offline ISO
+
+on:
+  push:
+    branches: [agent/iso-build-run]
+    paths:
+      - '.github/workflows/assemble-locked-iso-from-artifacts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cachyos-lxqt-locked-iso-assembly
+  cancel-in-progress: false
+
+env:
+  CALAMARES_COMMIT: f1c20a500e14448e36991f1b9d3ebae153827761
+  CACHYOS_LIVE_ISO_COMMIT: 4937780541814b4b0ec7c212c00fe06299f799b6
+  EXTERNAL_SOURCE_RUN_ID: '31616472561'
+  VALIDATOR_COMMIT: 673f780f36d07594b82ba991045f1537692cccd7
+  CACHE_DIR: .cache/pacman/pkg
+  DB_DIR: .cache/pacman/db
+  EMBEDDED_REPO: /opt/cachyos-offline-repo
+
+jobs:
+  build-iso:
+    name: Assemble v4 target ISO from verified checkpoints
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    container:
+      image: archlinux:base-devel
+      options: --privileged
+    env:
+      BUILDEVENT_APIKEY: ${{ secrets.HONEYCOMB_API_KEY }}
+      BUILDEVENT_DATASET: ${{ secrets.HONEYCOMB_DATASET }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+
+    steps:
+      - name: Checkout ISO specification
+        uses: actions/checkout@v4
+
+      - name: Checkout exact Calamares source
+        uses: actions/checkout@v4
+        with:
+          repository: CachyOS/cachyos-calamares
+          ref: ${{ env.CALAMARES_COMMIT }}
+          path: locked-calamares
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install baseline host image-build toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed \
+            python python-yaml curl jq git sudo gnupg \
+            archiso mkinitcpio-archiso squashfs-tools grub unzip libarchive
+
+          pacman-key --init
+          pacman-key --populate archlinux
+          pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
+          pacman-key --lsign-key F3B607488DB35A47
+
+          # Metadata/key inputs only. Do not enable v4 repositories for tools
+          # that execute on the hosted CI CPU.
+          pacman -U --noconfirm \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-27-1-any.pkg.tar.zst \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-v3-mirrorlist-27-1-any.pkg.tar.zst \
+            https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-v4-mirrorlist-27-1-any.pkg.tar.zst
+
+          ! grep -Fq '[cachyos-v4]' /etc/pacman.conf
+          ! grep -Fq '[cachyos-core-v4]' /etc/pacman.conf
+          ! grep -Fq '[cachyos-extra-v4]' /etc/pacman.conf
+
+          useradd -m builder || true
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+          mkdir -p out
+
+          # Fail immediately if host tooling cannot execute on this runner.
+          bsdtar --version
+          mksquashfs -version
+          grub-install --version
+          xorriso -version | head -n 1
+          rm -rf /tmp/host-tool-smoke
+          mkdir -p /tmp/host-tool-smoke/input
+          printf 'host-tool-smoke\n' > /tmp/host-tool-smoke/input/value
+          mksquashfs /tmp/host-tool-smoke/input /tmp/host-tool-smoke/test.sfs -noappend -quiet
+          test "$(unsquashfs -cat /tmp/host-tool-smoke/test.sfs value)" = 'host-tool-smoke'
+
+          {
+            echo "host_machine=$(uname -m)"
+            pacman -Q archiso libarchive squashfs-tools grub
+            echo 'host_pacman_repositories:'
+            grep -E '^\[[^]]+\]$' /etc/pacman.conf
+            df -h /
+            free -h
+          } | tee out/build-toolchain.txt
+
+      - name: Initialize ISO observability
+        shell: bash
+        run: bash .o11y/setup.sh
+
+      - name: Derive installer manifest from exact Calamares tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          .o11y/run-step.sh manifest-derivation -- \
+            python pipeline/tools/collect_locked_installer_packages.py \
+              --calamares-root locked-calamares \
+              --repo-root . \
+              --output-dir out
+          echo "Pinned Calamares commit: $CALAMARES_COMMIT"
+          echo "Top-level package/group entries: $(wc -l < out/top-level-packages.txt)"
+
+      - name: Derive exact base-package checkpoint key
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_input_hash="$({
+            printf 'calamares=%s\n' "$CALAMARES_COMMIT"
+            sha256sum \
+              manifests/offline-extras.txt \
+              manifests/repo-defaults.txt \
+              pipeline/tools/collect_locked_installer_packages.py \
+              scripts/force-cachyos-v4.py | sort -k2
+          } | sha256sum | cut -d' ' -f1)"
+          echo "PACKAGE_CACHE_KEY=cachyos-lxqt-v4-${package_input_hash}" >> "$GITHUB_ENV"
+          echo "Package cache key: cachyos-lxqt-v4-${package_input_hash}"
+
+      - name: Restore exact 1726-package target checkpoint
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/pacman/pkg
+            .cache/pacman/db
+          key: ${{ env.PACKAGE_CACHE_KEY }}
+          fail-on-cache-miss: true
+
+      - name: Verify base package checkpoint bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst"
+          test -s "$CACHE_DIR/SHA256SUMS"
+          (
+            cd "$CACHE_DIR"
+            sha256sum --strict --quiet -c SHA256SUMS
+          )
+          base_count=$(find "$CACHE_DIR" -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)
+          test "$base_count" -eq 1726
+          echo "BASE_PACKAGE_COUNT=$base_count" >> "$GITHUB_ENV"
+          du -sh "$CACHE_DIR" | tee out/base-repository-size.txt
+
+      - name: Download normalized six-package external checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: external-offline-packages-baseline-clean
+          path: external/checkpoint
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.EXTERNAL_SOURCE_RUN_ID }}
+
+      - name: Verify and merge exact external package identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          NORMALIZED=external/checkpoint/normalized
+          test -s "$NORMALIZED/EXTERNAL-SHA256SUMS"
+          test -s "$NORMALIZED/SOFTWARE-PACKAGES.json"
+          (
+            cd "$NORMALIZED"
+            sha256sum --strict --quiet -c EXTERNAL-SHA256SUMS
+          )
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('external/checkpoint/normalized/SOFTWARE-PACKAGES.json')
+          manifest = json.loads(path.read_text())
+          expected = {
+              'amnezia-vpn-offline', 'sing-box', 'tor-browser-offline',
+              'visual-studio-code-offline', 'windscribe-cli', 'xray-offline',
+          }
+          actual = {item['pkgname'] for item in manifest['packages']}
+          if actual != expected or len(manifest['packages']) != 6:
+              raise SystemExit(f'external SoftwarePackage identity mismatch: {sorted(actual)}')
+          PY
+          external_count=$(find "$NORMALIZED" -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)
+          test "$external_count" -eq 6
+
+          cp "$NORMALIZED"/*.pkg.tar.zst "$CACHE_DIR/"
+          rm -f "$CACHE_DIR"/cachyos-lxqt-offline.db* \
+                "$CACHE_DIR"/cachyos-lxqt-offline.files*
+          .o11y/run-step.sh repository-index -- \
+            repo-add "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst" "$CACHE_DIR"/*.pkg.tar.zst
+          (
+            cd "$CACHE_DIR"
+            sha256sum -- *.pkg.tar.zst | sort -k2 > SHA256SUMS
+            sha256sum --strict --quiet -c SHA256SUMS
+          )
+
+          final_count=$(find "$CACHE_DIR" -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)
+          expected=$(( BASE_PACKAGE_COUNT + external_count ))
+          test "$final_count" -eq "$expected"
+          test "$final_count" -eq 1732
+          {
+            echo "base_package_count=$BASE_PACKAGE_COUNT"
+            echo "external_package_count=$external_count"
+            echo "final_package_count=$final_count"
+            echo "external_source_run=$EXTERNAL_SOURCE_RUN_ID"
+            sha256sum "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst"
+            sha256sum "$CACHE_DIR/SHA256SUMS"
+          } | tee out/repository-snapshot-summary.txt
+
+      - name: Prove installer graph resolves with public networking absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          CACHE=$(realpath "$CACHE_DIR")
+          cat > /tmp/pacman-offline.conf <<EOF
+          [options]
+          Architecture = x86_64 x86_64_v2 x86_64_v3 x86_64_v4
+          SigLevel = Never
+          CacheDir = $CACHE
+          [cachyos-lxqt-offline]
+          SigLevel = Never
+          Server = file://$CACHE
+          EOF
+          rm -rf /tmp/offline-db
+          mkdir -p /tmp/offline-db/local /tmp/offline-db/sync
+          pacman --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db -Sy --noconfirm
+          mapfile -t packages < out/top-level-packages.txt
+          packages+=(windscribe-cli sing-box xray-offline visual-studio-code-offline tor-browser-offline amnezia-vpn-offline)
+          .o11y/run-step.sh offline-resolution -- \
+            pacman --config /tmp/pacman-offline.conf --dbpath /tmp/offline-db \
+              -Sp --noconfirm "${packages[@]}" > out/offline-resolution-urls.txt
+          test -s out/offline-resolution-urls.txt
+          echo "Offline package graph resolves: ${#packages[@]} explicit targets"
+
+      - name: Materialize exact CachyOS live ISO source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init cachyos-live
+          git -C cachyos-live remote add origin https://github.com/CachyOS/CachyOS-Live-ISO.git
+          .o11y/run-step.sh live-iso-source -- \
+            git -C cachyos-live fetch --depth 1 origin "$CACHYOS_LIVE_ISO_COMMIT"
+          git -C cachyos-live checkout --detach FETCH_HEAD
+          actual=$(git -C cachyos-live rev-parse HEAD)
+          test "$actual" = "$CACHYOS_LIVE_ISO_COMMIT"
+          printf '%s\n' "$actual" | tee out/cachyos-live-iso-commit.txt
+
+          # Target package policy is v4; host package policy remains baseline.
+          python scripts/force-cachyos-v4.py cachyos-live/archiso/pacman.conf
+          grep -Fq '[cachyos-v4]' cachyos-live/archiso/pacman.conf
+          grep -Fq '[cachyos-core-v4]' cachyos-live/archiso/pacman.conf
+          grep -Fq '[cachyos-extra-v4]' cachyos-live/archiso/pacman.conf
+          ! grep -Fq '[cachyos-v4]' /etc/pacman.conf
+
+          # Eliminate the pinned source tree's remaining moving mirrorlist fetch.
+          python pipeline/tools/patch_locked_live_iso.py cachyos-live
+          ! grep -Fq 'CachyOS-PKGBUILDS/raw/master' cachyos-live/util-iso.sh
+
+      - name: Preflight live profile dependency resolution
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/live-profile-db
+          mkdir -p /tmp/live-profile-db/local /tmp/live-profile-db/sync
+          pacman --config cachyos-live/archiso/pacman.conf \
+            --dbpath /tmp/live-profile-db -Sy --noconfirm
+          mapfile -t live_packages < cachyos-live/archiso/packages_desktop.x86_64
+          .o11y/run-step.sh live-profile-resolution -- \
+            pacman --config cachyos-live/archiso/pacman.conf \
+              --dbpath /tmp/live-profile-db -Sp --noconfirm \
+              "${live_packages[@]}" > out/live-profile-resolution-urls.txt
+          test -s out/live-profile-resolution-urls.txt
+          echo "Live profile resolves ${#live_packages[@]} explicit targets"
+
+      - name: Inject cleanup-safe local repository and locked Calamares overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          python pipeline/tools/prepare_locked_offline_profile.py \
+            cachyos-live/archiso "$CACHE_DIR" out/top-level-packages.txt locked-calamares
+
+          AIROOT=cachyos-live/archiso/airootfs
+          REPO="$AIROOT/opt/cachyos-offline-repo"
+          OVERLAY="$AIROOT/usr/local/lib/cachyos-offline-overlay/rootfs"
+          test -d "$REPO"
+          test -s "$REPO/cachyos-lxqt-offline.db.tar.zst"
+          test -s "$REPO/SHA256SUMS"
+          embedded_count=$(find "$REPO" -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)
+          test "$embedded_count" -eq 1732
+          (cd "$REPO" && sha256sum --strict --quiet -c SHA256SUMS)
+
+          grep -Fqx 'CacheDir = /opt/cachyos-offline-repo' "$AIROOT/etc/pacman-offline.conf"
+          grep -Fqx 'Server = file:///opt/cachyos-offline-repo' "$AIROOT/etc/pacman-offline.conf"
+          test -d "$OVERLAY"
+          test -x "$AIROOT/usr/local/lib/cachyos-offline-overlay/apply.sh"
+          test -s "$AIROOT/etc/pacman.d/hooks/00-cachyos-offline-overlay.hook"
+          grep -q 'default: LXQT-Desktop' "$OVERLAY/etc/calamares/modules/packagechooser_desktop.conf"
+          grep -Fq 'pacman -r "$newroot" -Sy --config=/etc/pacman.conf' \
+            "$OVERLAY/etc/calamares/scripts/pacstrap_calamares"
+          ! grep -Fq 'pacman --sysroot "$newroot"' \
+            "$OVERLAY/etc/calamares/scripts/pacstrap_calamares"
+          ! grep -q 'pacman -Sy' "$AIROOT/usr/local/bin/calamares-online.sh"
+          ! grep -q 'internet' "$OVERLAY/etc/calamares/modules/welcome_online.conf"
+
+          # Explicitly prove our product repository is not located in the path
+          # archiso treats as disposable package cache.
+          grep -Fq 'var/cache/pacman/pkg' "$(command -v mkarchiso)"
+          ! grep -Fq '/opt/cachyos-offline-repo' "$(command -v mkarchiso)"
+          test "$REPO" != "$AIROOT/var/cache/pacman/pkg"
+          echo "Embedded repository survives archiso package-cache cleanup by construction"
+
+      - name: Enforce mkarchiso disk headroom budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo_bytes=$(du -sb cachyos-live/archiso/airootfs/opt/cachyos-offline-repo | cut -f1)
+          free_bytes=$(df --output=avail -B1 "$GITHUB_WORKSPACE" | tail -n1 | tr -d ' ')
+          required_bytes=$(( repo_bytes * 2 + 8 * 1024 * 1024 * 1024 ))
+          {
+            echo "embedded_repo_bytes=$repo_bytes"
+            echo "free_bytes=$free_bytes"
+            echo "required_bytes=$required_bytes"
+          } | tee out/resource-budget.txt
+          if (( free_bytes < required_bytes )); then
+            echo "insufficient disk headroom for mkarchiso" >&2
+            exit 1
+          fi
+
+      - name: Build custom offline ISO
+        shell: bash
+        working-directory: cachyos-live
+        run: |
+          set -euo pipefail
+          chmod -R a+rwX .
+          ../.o11y/run-step.sh mkarchiso -- \
+            sudo -H -E -u builder ./buildiso.sh -p desktop -v -w
+
+      - name: Record image candidate provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISO=$(find cachyos-live/out -type f -name '*.iso' -print -quit)
+          test -n "$ISO"
+          sha256sum "$ISO" | tee out/ISO-SHA256SUMS
+          du -h "$ISO" | tee out/iso-size.txt
+          {
+            echo "source_commit=${GITHUB_SHA}"
+            echo "calamares_commit=${CALAMARES_COMMIT}"
+            echo "live_iso_commit=${CACHYOS_LIVE_ISO_COMMIT}"
+            echo "external_source_run=${EXTERNAL_SOURCE_RUN_ID}"
+            echo "package_cache_key=${PACKAGE_CACHE_KEY}"
+            echo "host_toolchain_policy=baseline-arch-x86_64"
+            echo "target_repository_policy=cachyos-v4"
+            echo "embedded_repo_path=/opt/cachyos-offline-repo"
+          } | tee out/candidate-provenance.txt
+          echo "ISO=$ISO" >> "$GITHUB_ENV"
+
+      - name: Upload ISO candidate and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-lxqt-v4-offline-workstation-locked
+          path: |
+            ${{ env.ISO }}
+            out/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Report ISO build failure
+        if: failure()
+        continue-on-error: true
+        shell: bash
+        run: |
+          PY=python
+          if [ -x .o11y/.venv/bin/python ]; then PY=.o11y/.venv/bin/python; fi
+          "$PY" .o11y/report_failure.py --job locked-iso-assembly
+
+      - name: Finalize ISO observability
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: bash .o11y/finalize.sh "${{ job.status }}"
+
+      - name: Upload ISO diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: o11y-locked-iso-assembly-${{ github.run_id }}
+          path: .o11y/runtime/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  certify-iso:
+    name: Certify finished ISO on fresh runner
+    needs: build-iso
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout pinned independent validator
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VALIDATOR_COMMIT }}
+          path: validator
+          persist-credentials: false
+
+      - name: Download candidate from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: cachyos-lxqt-v4-offline-workstation-locked
+          path: candidate
+
+      - name: Install userspace artifact inspection tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            squashfs-tools zstd libarchive-tools
+          df -h /
+
+      - name: Validate actual embedded repository and installer state
+        shell: bash
+        run: |
+          set -euo pipefail
+          ISO=$(find candidate -type f -name '*.iso' -print -quit)
+          test -n "$ISO"
+          mkdir -p verified
+          sha256sum "$ISO" | tee verified/ISO-SHA256SUMS
+          du -h "$ISO" | tee verified/iso-size.txt
+          bash validator/scripts/verify-offline-iso-v2.sh "$ISO" \
+            > >(tee verified/offline-iso-validation.log) \
+            2> >(tee verified/offline-iso-validation.stderr >&2)
+
+      - name: Upload independent certification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-lxqt-v4-offline-workstation-locked-verification-${{ github.run_id }}
+          path: verified/
+          if-no-files-found: ignore
+          retention-days: 14
