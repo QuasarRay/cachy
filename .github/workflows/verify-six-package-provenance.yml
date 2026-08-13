@@ -48,7 +48,12 @@ jobs:
           CHECKPOINT_DIR: ${{ github.workspace }}/checkpoint
           AMNEZIA_SOURCE_DIR: ${{ github.workspace }}/amnezia-source
           EVIDENCE_DIR: ${{ github.workspace }}/evidence
-        run: python3 pipeline/tools/verify_six_package_provenance.py
+        run: |
+          set -euo pipefail
+          amnezia_bin=$(find "$AMNEZIA_SOURCE_DIR" -type f -name 'AmneziaVPN_Linux_Installer.bin' -print -quit)
+          test -n "$amnezia_bin"
+          ln -f "$amnezia_bin" "$AMNEZIA_SOURCE_DIR/AmneziaVPN.run"
+          python3 pipeline/tools/verify_six_package_provenance.py
 
       - name: Upload verification evidence even on failure
         if: always()
