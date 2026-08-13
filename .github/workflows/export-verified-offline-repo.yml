@@ -1,0 +1,148 @@
+name: Export Verified CachyOS Offline Repository
+
+on:
+  push:
+    branches: [agent/iso-build-run]
+    paths:
+      - '.github/workflows/export-verified-offline-repo.yml'
+      - 'pipeline/tools/verify_cache_against_syncdb.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: export-verified-cachyos-offline-repo
+  cancel-in-progress: false
+
+env:
+  CACHE_DIR: .cache/pacman/pkg
+  DB_DIR: .cache/pacman/db
+  EXPECTED_PACKAGE_COUNT: '1726'
+  EXPECTED_CACHE_KEY: cachyos-lxqt-v4-47180113d766196dbf20615d2fb7c3098a49393faf61ca3b219a0836f0cd4a38
+
+jobs:
+  verify-and-export:
+    name: Verify cached bytes against original repository hashes and export
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: archlinux:base
+
+    steps:
+      - name: Check out export tooling
+        uses: actions/checkout@v4
+
+      - name: Install baseline verification tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          pacman -Sy --noconfirm --needed python libarchive coreutils
+          python --version
+          bsdtar --version
+          sha256sum --version | head -n 1
+
+      - name: Restore exact 5.4 GB package checkpoint
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .cache/pacman/pkg
+            .cache/pacman/db
+          key: ${{ env.EXPECTED_CACHE_KEY }}
+          fail-on-cache-miss: true
+
+      - name: Verify checkpoint's post-download checksum manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "$CACHE_DIR/SHA256SUMS"
+          test -s "$CACHE_DIR/cachyos-lxqt-offline.db.tar.zst"
+          package_count=$(find "$CACHE_DIR" -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)
+          test "$package_count" -eq "$EXPECTED_PACKAGE_COUNT"
+          (
+            cd "$CACHE_DIR"
+            sha256sum --strict --quiet -c SHA256SUMS
+          )
+          echo "Existing checkpoint manifest verifies all $package_count cached package files"
+
+      - name: Compare every cached package hash with original Pacman repository metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf export
+          mkdir -p export/cachyos-lxqt-offline-repo export/verification-source/pacman-sync-db
+
+          python pipeline/tools/verify_cache_against_syncdb.py \
+            --cache-dir "$CACHE_DIR" \
+            --db-dir "$DB_DIR" \
+            --expected-count "$EXPECTED_PACKAGE_COUNT" \
+            --upstream-sums export/cachyos-lxqt-offline-repo/UPSTREAM-SHA256SUMS \
+            --report-json export/VERIFICATION.json
+
+          # Hard-link the already-verified repository payloads into the export tree so
+          # we do not consume another ~5.4 GiB of runner disk before artifact upload.
+          cp -al "$CACHE_DIR"/. export/cachyos-lxqt-offline-repo/
+          cp -a "$DB_DIR"/sync/*.db export/verification-source/pacman-sync-db/
+
+          # Re-run the authoritative manifest against the actual files that will be
+          # uploaded, not merely against their source paths.
+          (
+            cd export/cachyos-lxqt-offline-repo
+            sha256sum --strict --quiet -c UPSTREAM-SHA256SUMS
+          )
+
+          cat > export/README.txt <<'EOF'
+          CachyOS LXQt offline package repository
+          =======================================
+
+          This artifact contains the exact 1,726-package checkpoint used by the
+          custom CachyOS ISO work.
+
+          Integrity evidence:
+          - cachyos-lxqt-offline-repo/UPSTREAM-SHA256SUMS contains the SHA-256
+            values copied from the saved Pacman sync repository metadata used for
+            the original package resolution/download.
+          - VERIFICATION.json records the per-package comparison result and hashes
+            of those saved sync databases.
+          - verification-source/pacman-sync-db/ contains those original sync DBs.
+          - cachyos-lxqt-offline-repo/SHA256SUMS is the post-download checkpoint
+            manifest generated when the cache was first created.
+
+          To re-check after downloading:
+            cd cachyos-lxqt-offline-repo
+            sha256sum -c UPSTREAM-SHA256SUMS
+
+          For manual Pacman use, point a repository stanza at the absolute path:
+            [cachyos-lxqt-offline]
+            SigLevel = Optional TrustAll
+            Server = file:///ABSOLUTE/PATH/TO/cachyos-lxqt-offline-repo
+
+          The six separately-built external packages are not part of this
+          1,726-package base checkpoint.
+          EOF
+
+          {
+            echo "package_count=$(find export/cachyos-lxqt-offline-repo -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)"
+            echo "repository_bytes=$(du -sb export/cachyos-lxqt-offline-repo | cut -f1)"
+            echo "cache_key=$EXPECTED_CACHE_KEY"
+            echo "verification=all cached package SHA-256 values match saved original Pacman repository SHA256SUM metadata"
+          } | tee export/EXPORT-SUMMARY.txt
+
+      - name: Upload verified offline repository
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: cachyos-lxqt-offline-repo-verified-1726
+          path: export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Record downloadable artifact identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "artifact_id=${{ steps.upload.outputs.artifact-id }}"
+          echo "artifact_url=${{ steps.upload.outputs.artifact-url }}"
+          echo "artifact_digest=${{ steps.upload.outputs.artifact-digest }}"
