@@ -1,0 +1,66 @@
+name: Verify six offline package payloads
+
+on:
+  push:
+    branches:
+      - agent/verify-six-package-provenance
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact verification branch
+        uses: actions/checkout@v4
+
+      - name: Download exact six-package checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: external-offline-packages-baseline-clean
+          path: checkpoint
+          github-token: ${{ github.token }}
+          run-id: 31616472561
+
+      - name: Download exact Amnezia source-build checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: amnezia-source-build
+          path: amnezia-source
+          github-token: ${{ github.token }}
+          run-id: 31614038706
+
+      - name: Install independent verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libarchive-tools jq gnupg xz-utils zstd unzip diffutils \
+            rpm rpm2cpio cpio file curl python3
+
+      - name: Verify all six package provenance chains
+        id: verify
+        continue-on-error: true
+        env:
+          CHECKPOINT_DIR: ${{ github.workspace }}/checkpoint
+          AMNEZIA_SOURCE_DIR: ${{ github.workspace }}/amnezia-source
+          EVIDENCE_DIR: ${{ github.workspace }}/evidence
+        run: python3 pipeline/tools/verify_six_package_provenance.py
+
+      - name: Upload verification evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-six-package-provenance-evidence
+          path: evidence
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce strict all-six result
+        if: always()
+        run: |
+          cat evidence/report.txt
+          test -f evidence/STRICT_SUCCESS
