@@ -15,8 +15,7 @@ jobs:
   bundle:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    continue-on-error: false
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -75,15 +74,17 @@ jobs:
           curl -fL --retry 5 \
             "https://raw.githubusercontent.com/PikaOS-Linux/pika-base-debian-container/${PIKA_BASE_COMMIT}/deb-multimedia-keyring.gpg" \
             -o /tmp/deb-multimedia-keyring.gpg
-          sha256sum /tmp/pika-setup.sh /tmp/pika-keyring.gpg.key /tmp/deb-multimedia-keyring.gpg
 
-          # The pinned setup script refers to its own main branch for key files. Rewrite
-          # only those self-references to this pinned revision so our configuration input
-          # cannot silently drift between runs.
           sed -i "s#pika-base-debian-container/raw/main/#pika-base-debian-container/raw/${PIKA_BASE_COMMIT}/#g" /tmp/pika-setup.sh
           bash /tmp/pika-setup.sh
           apt-get update
           apt-cache policy | tee /tmp/apt-policy.txt
+          sha256sum \
+            /tmp/pika-setup.sh \
+            /tmp/pika-keyring.gpg.key \
+            /tmp/deb-multimedia-keyring.gpg \
+            /etc/apt/preferences.d/0-debian-exp-overrides \
+            | tee /tmp/pika-bootstrap-inputs.sha256
 
       - name: Validate requested package names
         shell: bash
@@ -99,25 +100,30 @@ jobs:
             printf '%s\n' "$package" >> "/work/${BUNDLE_NAME}/evidence/top-level-packages.txt"
           done
 
-      - name: Download package closure through authenticated APT metadata
+      - name: Download complete package closure from an empty package state
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "/work/${BUNDLE_NAME}/repo"
+          repo="/work/${BUNDLE_NAME}/repo"
+          mkdir -p "$repo/partial"
+          : > /tmp/empty-dpkg-status
+
+          # Resolve as if nothing were installed. This makes the artifact independent
+          # of packages that happen to exist in the GitHub/Debian builder container.
           DEBIAN_FRONTEND=noninteractive apt-get \
-            -o Dir::Cache::archives="/work/${BUNDLE_NAME}/repo" \
+            -o Dir::State::status=/tmp/empty-dpkg-status \
+            -o Dir::Cache::archives="$repo" \
             -o APT::Keep-Downloaded-Packages=true \
             --download-only --yes install $TOP_LEVEL_PACKAGES
 
-          cd "/work/${BUNDLE_NAME}/repo"
-          for package in $TOP_LEVEL_PACKAGES; do
-            apt-get download "$package"
-          done
-          rm -f lock
-          rm -rf partial
-          package_count=$(find . -maxdepth 1 -type f -name '*.deb' | wc -l)
+          rm -f "$repo/lock"
+          rm -rf "$repo/partial"
+          package_count=$(find "$repo" -maxdepth 1 -type f -name '*.deb' | wc -l)
           test "$package_count" -gt 0
-          echo "package_count=$package_count" | tee "/work/${BUNDLE_NAME}/evidence/summary.txt"
+          {
+            echo "package_count=$package_count"
+            echo 'closure_mode=empty-dpkg-status'
+          } | tee "/work/${BUNDLE_NAME}/evidence/summary.txt"
 
       - name: Independently compare every downloaded deb to authenticated repository SHA256 metadata
         shell: bash
@@ -142,9 +148,10 @@ jobs:
           cat > ../README.txt <<EOF
           Offline PikaOS package bundle: ${BUNDLE_NAME}
 
-          Packages were resolved using PikaOS's package universe configured by pinned
-          PikaOS builder revision ${PIKA_BASE_COMMIT}. Each .deb was independently
-          compared to the SHA-256 recorded in authenticated APT package metadata.
+          This is a self-contained dependency closure resolved from an empty dpkg
+          status database using the PikaOS package universe configured by pinned
+          PikaOS builder revision ${PIKA_BASE_COMMIT}. Every .deb was independently
+          compared to the SHA-256 in authenticated APT package metadata.
 
           Install after extracting onto PikaOS:
 
@@ -152,23 +159,23 @@ jobs:
             sudo apt update
             sudo apt install \$(tr '\n' ' ' < /ABSOLUTE/PATH/TO/evidence/top-level-packages.txt)
 
-          The local repository uses trusted=yes only because the files themselves are
-          already pinned by evidence/SHA256SUMS and evidence/VERIFICATION.json; do not
-          use trusted=yes for arbitrary network repositories.
+          The local repository uses trusted=yes only for the locally verified files.
+          Do not use trusted=yes for arbitrary network repositories.
           EOF
           cp /tmp/apt-policy.txt ../evidence/apt-policy.txt
           cp /tmp/pika-setup.sh ../evidence/pika-setup-pinned.sh
-          sha256sum /tmp/pika-setup.sh /tmp/pika-keyring.gpg.key /tmp/deb-multimedia-keyring.gpg \
-            > ../evidence/pika-bootstrap-inputs.sha256
+          cp /tmp/pika-bootstrap-inputs.sha256 ../evidence/pika-bootstrap-inputs.sha256
+          cp /etc/apt/preferences.d/0-debian-exp-overrides ../evidence/0-debian-exp-overrides
           printf '%s\n' "$PIKA_BASE_COMMIT" > ../evidence/pika-base-builder-commit.txt
           printf '%s\n' "$TOP_LEVEL_PACKAGES" > ../evidence/requested-packages-one-line.txt
 
-      - name: Verify local repository can resolve requested packages with network sources disabled
+      - name: Prove local-only resolution from an empty package state
         shell: bash
         run: |
           set -euo pipefail
           rm -rf /tmp/offline-lists
           mkdir -p /tmp/offline-lists/partial
+          : > /tmp/offline-empty-status
           cat > /tmp/offline.sources.list <<EOF
           deb [trusted=yes] file:/work/${BUNDLE_NAME}/repo ./
           EOF
@@ -176,12 +183,15 @@ jobs:
             -o Dir::Etc::sourcelist=/tmp/offline.sources.list \
             -o Dir::Etc::sourceparts=- \
             -o Dir::State::lists=/tmp/offline-lists \
+            -o Dir::State::status=/tmp/offline-empty-status \
             update
           apt-get \
             -o Dir::Etc::sourcelist=/tmp/offline.sources.list \
             -o Dir::Etc::sourceparts=- \
             -o Dir::State::lists=/tmp/offline-lists \
-            --simulate install $TOP_LEVEL_PACKAGES | tee "/work/${BUNDLE_NAME}/evidence/offline-resolution.txt"
+            -o Dir::State::status=/tmp/offline-empty-status \
+            --simulate install $TOP_LEVEL_PACKAGES \
+            | tee "/work/${BUNDLE_NAME}/evidence/offline-resolution-empty-state.txt"
 
       - name: Upload verified offline bundle
         uses: actions/upload-artifact@v4
