@@ -41,6 +41,23 @@ def apt_stanzas(package: str, version: str) -> list[dict[str, str]]:
     return stanzas
 
 
+def deb_fields(path: Path) -> tuple[str, str, str]:
+    # dpkg-deb labels fields when multiple names are requested, e.g.
+    # "Package: xonsh". Parse the complete control stanza instead of assuming
+    # positional raw values so epochs and unusual version strings remain intact.
+    raw = subprocess.check_output(['dpkg-deb', '-f', str(path)], text=True)
+    fields: dict[str, str] = {}
+    for line in raw.splitlines():
+        if line[:1].isspace() or ': ' not in line:
+            continue
+        key, value = line.split(': ', 1)
+        fields[key] = value
+    missing = [k for k in ('Package', 'Version', 'Architecture') if not fields.get(k)]
+    if missing:
+        raise ValueError(f'missing Debian control fields {missing}')
+    return fields['Package'], fields['Version'], fields['Architecture']
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('deb_dir', type=Path)
@@ -50,14 +67,11 @@ def main() -> int:
     records = []
     failures = []
     for deb in sorted(args.deb_dir.glob('*.deb')):
-        fields = subprocess.check_output(
-            ['dpkg-deb', '-f', str(deb), 'Package', 'Version', 'Architecture'],
-            text=True,
-        ).splitlines()
-        if len(fields) != 3:
-            failures.append({'file': deb.name, 'reason': 'could not read Package/Version/Architecture'})
+        try:
+            package, version, arch = deb_fields(deb)
+        except Exception as exc:
+            failures.append({'file': deb.name, 'reason': f'could not read Package/Version/Architecture: {exc}'})
             continue
-        package, version, arch = fields
         actual = sha256(deb)
         stanzas = apt_stanzas(package, version)
         matches = [s for s in stanzas if s.get('SHA256') == actual]
