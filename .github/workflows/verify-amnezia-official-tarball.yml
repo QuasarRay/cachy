@@ -1,0 +1,120 @@
+name: Verify Official Amnezia Linux Tarball
+
+on:
+  push:
+    branches: [agent/iso-build-run]
+    paths:
+      - '.github/workflows/verify-amnezia-official-tarball.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AMNEZIA_TAG: '4.8.21.0'
+  AMNEZIA_ASSET: 'AmneziaVPN_4.8.21.0_linux_x64.tar'
+  PINNED_PUBLISHER_SHA256: 'bc214d824fc5a607b27f11a8a0c0f417657d03adba65d09f142244215842a7df'
+
+jobs:
+  verify-and-publish:
+    name: Verify publisher hash and publish untouched tarball
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Resolve official release asset and publisher digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p amnezia-official/evidence
+
+          release_api="https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/tags/${AMNEZIA_TAG}"
+          curl --fail --location --retry 3 \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "$release_api" \
+            --output amnezia-official/evidence/release.json
+
+          jq --exit-status \
+            --arg asset "$AMNEZIA_ASSET" \
+            '.assets[] | select(.name == $asset)' \
+            amnezia-official/evidence/release.json \
+            > amnezia-official/evidence/publisher-asset.json
+
+          publisher_digest=$(jq -r '.digest' amnezia-official/evidence/publisher-asset.json)
+          publisher_size=$(jq -r '.size' amnezia-official/evidence/publisher-asset.json)
+          download_url=$(jq -r '.browser_download_url' amnezia-official/evidence/publisher-asset.json)
+
+          test "$publisher_digest" = "sha256:${PINNED_PUBLISHER_SHA256}"
+          test "$publisher_size" -gt 0
+          test -n "$download_url"
+
+          printf '%s\n' "$publisher_digest" > amnezia-official/evidence/PUBLISHER-DIGEST
+          printf '%s\n' "$publisher_size" > amnezia-official/evidence/PUBLISHER-SIZE
+          printf '%s\n' "$download_url" > amnezia-official/evidence/PUBLISHER-DOWNLOAD-URL
+          printf 'DOWNLOAD_URL=%s\n' "$download_url" >> "$GITHUB_ENV"
+          printf 'PUBLISHER_SIZE=%s\n' "$publisher_size" >> "$GITHUB_ENV"
+
+      - name: Download untouched official Linux tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            "$DOWNLOAD_URL" \
+            --output "amnezia-official/${AMNEZIA_ASSET}"
+          test -s "amnezia-official/${AMNEZIA_ASSET}"
+
+      - name: Require downloaded bytes to match publisher SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball="amnezia-official/${AMNEZIA_ASSET}"
+          actual_sha256=$(sha256sum "$tarball" | awk '{print $1}')
+          actual_size=$(stat -c '%s' "$tarball")
+          publisher_sha256=$(sed 's/^sha256://' amnezia-official/evidence/PUBLISHER-DIGEST)
+
+          test "$actual_sha256" = "$publisher_sha256"
+          test "$actual_sha256" = "$PINNED_PUBLISHER_SHA256"
+          test "$actual_size" = "$PUBLISHER_SIZE"
+
+          printf '%s  %s\n' "$actual_sha256" "$AMNEZIA_ASSET" \
+            > amnezia-official/SHA256SUMS
+          printf '%s\n' "$actual_sha256" \
+            > amnezia-official/evidence/COMPUTED-SHA256
+          printf '%s\n' "$actual_size" \
+            > amnezia-official/evidence/COMPUTED-SIZE
+
+          cat > amnezia-official/evidence/VERIFICATION.txt <<EOF
+          source_repository=amnezia-vpn/amnezia-client
+          release_tag=${AMNEZIA_TAG}
+          asset=${AMNEZIA_ASSET}
+          publisher_sha256=${publisher_sha256}
+          computed_sha256=${actual_sha256}
+          publisher_size=${PUBLISHER_SIZE}
+          computed_size=${actual_size}
+          verification=PASS
+          EOF
+
+          echo "Verified official Amnezia release tarball"
+          echo "SHA256=${actual_sha256}"
+          echo "SIZE=${actual_size}"
+
+      - name: Upload verified official Amnezia tarball artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: amnezia-official-linux-x64-4.8.21.0-sha256-verified
+          path: amnezia-official/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Record GitHub Actions wrapper digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Actions artifact id: ${{ steps.upload.outputs.artifact-id }}"
+          echo "Actions artifact URL: ${{ steps.upload.outputs.artifact-url }}"
+          echo "Actions wrapper digest: ${{ steps.upload.outputs.artifact-digest }}"
+          echo "Payload tarball publisher digest: sha256:${PINNED_PUBLISHER_SHA256}"
+          echo 'The Actions artifact is a ZIP wrapper; its wrapper digest is not expected to equal the contained official tarball digest.'
