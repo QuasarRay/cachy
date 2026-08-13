@@ -21,6 +21,8 @@ env:
   DB_DIR: .cache/pacman/db
   EXPECTED_PACKAGE_COUNT: '1726'
   EXPECTED_CACHE_KEY: cachyos-lxqt-v4-47180113d766196dbf20615d2fb7c3098a49393faf61ca3b219a0836f0cd4a38
+  SOURCE_RESOLUTION_RUN_ID: '31613260980'
+  SOURCE_RESOLUTION_ARTIFACT: cachyos-lxqt-package-manifests-v4-31613260980
 
 jobs:
   verify-and-export:
@@ -42,6 +44,25 @@ jobs:
           python --version
           bsdtar --version
           sha256sum --version | head -n 1
+
+      - name: Download original Pacman resolution manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SOURCE_RESOLUTION_ARTIFACT }}
+          path: original-resolution
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.SOURCE_RESOLUTION_RUN_ID }}
+
+      - name: Validate original resolution manifest identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s original-resolution/resolved-packages.tsv
+          resolved_count=$(wc -l < original-resolution/resolved-packages.tsv)
+          test "$resolved_count" -eq "$EXPECTED_PACKAGE_COUNT"
+          echo "Original Pacman resolution records: $resolved_count"
+          sha256sum original-resolution/resolved-packages.tsv
 
       - name: Restore exact 5.4 GB package checkpoint
         uses: actions/cache/restore@v4
@@ -66,7 +87,7 @@ jobs:
           )
           echo "Existing checkpoint manifest verifies all $package_count cached package files"
 
-      - name: Compare every cached package hash with original Pacman repository metadata
+      - name: Compare every cached package hash with its originally selected repository
         shell: bash
         run: |
           set -euo pipefail
@@ -76,6 +97,7 @@ jobs:
           python pipeline/tools/verify_cache_against_syncdb.py \
             --cache-dir "$CACHE_DIR" \
             --db-dir "$DB_DIR" \
+            --resolved-packages original-resolution/resolved-packages.tsv \
             --expected-count "$EXPECTED_PACKAGE_COUNT" \
             --upstream-sums export/cachyos-lxqt-offline-repo/UPSTREAM-SHA256SUMS \
             --report-json export/VERIFICATION.json
@@ -84,6 +106,7 @@ jobs:
           # we do not consume another ~5.4 GiB of runner disk before artifact upload.
           cp -al "$CACHE_DIR"/. export/cachyos-lxqt-offline-repo/
           cp -a "$DB_DIR"/sync/*.db export/verification-source/pacman-sync-db/
+          cp -a original-resolution/resolved-packages.tsv export/verification-source/
 
           # Re-run the authoritative manifest against the actual files that will be
           # uploaded, not merely against their source paths.
@@ -100,14 +123,17 @@ jobs:
           custom CachyOS ISO work.
 
           Integrity evidence:
+          - verification-source/resolved-packages.tsv is the original 1,726-line
+            Pacman resolution manifest from cache workflow run 31613260980. It
+            identifies the exact repository and URL selected for every package.
           - cachyos-lxqt-offline-repo/UPSTREAM-SHA256SUMS contains the SHA-256
-            values copied from the saved Pacman sync repository metadata used for
-            the original package resolution/download.
-          - VERIFICATION.json records the per-package comparison result and hashes
-            of those saved sync databases.
-          - verification-source/pacman-sync-db/ contains those original sync DBs.
-          - cachyos-lxqt-offline-repo/SHA256SUMS is the post-download checkpoint
-            manifest generated when the cache was first created.
+            from that selected repository's saved Pacman sync metadata for each
+            package, not a hash generated from the cache itself.
+          - VERIFICATION.json records every package/repository/hash comparison and
+            hashes of the resolution manifest and saved sync databases.
+          - verification-source/pacman-sync-db/ contains those saved sync DBs.
+          - cachyos-lxqt-offline-repo/SHA256SUMS is the separate post-download
+            checkpoint manifest generated when the cache was first created.
 
           To re-check after downloading:
             cd cachyos-lxqt-offline-repo
@@ -126,7 +152,8 @@ jobs:
             echo "package_count=$(find export/cachyos-lxqt-offline-repo -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)"
             echo "repository_bytes=$(du -sb export/cachyos-lxqt-offline-repo | cut -f1)"
             echo "cache_key=$EXPECTED_CACHE_KEY"
-            echo "verification=all cached package SHA-256 values match saved original Pacman repository SHA256SUM metadata"
+            echo "source_resolution_run=$SOURCE_RESOLUTION_RUN_ID"
+            echo "verification=all cached package SHA-256 values match the saved metadata of the exact repositories selected by the original Pacman resolution"
           } | tee export/EXPORT-SUMMARY.txt
 
       - name: Upload verified offline repository
