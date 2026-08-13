@@ -1,0 +1,187 @@
+name: Build verified PikaOS offline APT bundles
+
+on:
+  push:
+    branches: [agent/pika-offline-artifacts]
+    paths:
+      - '.github/workflows/build-pika-offline-apt-bundles.yml'
+      - 'pipeline/tools/verify_apt_bundle.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: pika-dev-toolchains
+            packages: >-
+              build-essential gcc g++ clang clangd lldb llvm cmake ninja-build meson pkg-config
+              gdb valgrind ccache rustc cargo golang-go default-jdk maven gradle nodejs npm
+              python3 python3-dev python3-venv python3-pip pipx git git-lfs
+          - name: pika-containers-ansible
+            packages: >-
+              docker.io docker-cli docker-buildx docker-compose podman podman-compose buildah skopeo
+              containerd runc ansible ansible-core ansible-lint yamllint sshpass python3-jmespath python3-netaddr
+          - name: pika-kvm-qemu-libvirt
+            packages: >-
+              qemu-system-x86 qemu-utils qemu-system-gui libvirt-daemon-system libvirt-clients
+              virt-manager virt-viewer ovmf swtpm bridge-utils dnsmasq-base libguestfs-tools spice-client-gtk
+          - name: pika-xonsh-starship-cli
+            packages: >-
+              xonsh starship fzf ripgrep fd-find bat tmux zoxide jq curl wget
+          - name: pika-tor-ecosystem
+            packages: >-
+              tor torsocks torbrowser-launcher obfs4proxy snowflake-client nyx proxychains4
+          - name: pika-vscode
+            packages: >-
+              code
+
+    container:
+      image: debian:sid
+
+    env:
+      PIKA_BASE_COMMIT: f785f6c29c9b3917f08c6c9e21f04a1b37b8adc4
+      BUNDLE_NAME: ${{ matrix.name }}
+      TOP_LEVEL_PACKAGES: ${{ matrix.packages }}
+
+    steps:
+      - name: Bootstrap minimal tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl wget gnupg debian-archive-keyring apt-transport-https \
+            dpkg-dev python3 gzip xz-utils zstd
+
+      - name: Configure official PikaOS package universe from pinned builder revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 \
+            "https://raw.githubusercontent.com/PikaOS-Linux/pika-base-debian-container/${PIKA_BASE_COMMIT}/setup.sh" \
+            -o /tmp/pika-setup.sh
+          curl -fL --retry 5 \
+            "https://raw.githubusercontent.com/PikaOS-Linux/pika-base-debian-container/${PIKA_BASE_COMMIT}/pika-keyring.gpg.key" \
+            -o /tmp/pika-keyring.gpg.key
+          curl -fL --retry 5 \
+            "https://raw.githubusercontent.com/PikaOS-Linux/pika-base-debian-container/${PIKA_BASE_COMMIT}/deb-multimedia-keyring.gpg" \
+            -o /tmp/deb-multimedia-keyring.gpg
+          sha256sum /tmp/pika-setup.sh /tmp/pika-keyring.gpg.key /tmp/deb-multimedia-keyring.gpg
+          bash /tmp/pika-setup.sh
+          apt-get update
+          apt-cache policy | tee /tmp/apt-policy.txt
+
+      - name: Validate requested package names
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "/work/${BUNDLE_NAME}/evidence"
+          : > "/work/${BUNDLE_NAME}/evidence/top-level-packages.txt"
+          for package in $TOP_LEVEL_PACKAGES; do
+            if ! apt-cache show "$package" >/dev/null 2>&1; then
+              echo "Requested package is unavailable in configured PikaOS package universe: $package" >&2
+              exit 1
+            fi
+            printf '%s\n' "$package" >> "/work/${BUNDLE_NAME}/evidence/top-level-packages.txt"
+          done
+
+      - name: Download package closure through authenticated APT metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "/work/${BUNDLE_NAME}/repo"
+          # APT validates Release/InRelease signatures and package hashes while downloading.
+          DEBIAN_FRONTEND=noninteractive apt-get \
+            -o Dir::Cache::archives="/work/${BUNDLE_NAME}/repo" \
+            -o APT::Keep-Downloaded-Packages=true \
+            --download-only --yes install $TOP_LEVEL_PACKAGES
+
+          # Ensure every requested top-level package itself is physically present even if the base container already had it.
+          cd "/work/${BUNDLE_NAME}/repo"
+          for package in $TOP_LEVEL_PACKAGES; do
+            apt-get download "$package"
+          done
+          rm -f lock
+          rm -rf partial
+          package_count=$(find . -maxdepth 1 -type f -name '*.deb' | wc -l)
+          test "$package_count" -gt 0
+          echo "package_count=$package_count" | tee "/work/${BUNDLE_NAME}/evidence/summary.txt"
+
+      - name: Independently compare every downloaded deb to authenticated repository SHA256 metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp pipeline/tools/verify_apt_bundle.py /tmp/verify_apt_bundle.py
+          python3 /tmp/verify_apt_bundle.py \
+            "/work/${BUNDLE_NAME}/repo" \
+            "/work/${BUNDLE_NAME}/evidence/VERIFICATION.json"
+          (
+            cd "/work/${BUNDLE_NAME}/repo"
+            sha256sum -- *.deb | sort -k2 > ../evidence/SHA256SUMS
+          )
+
+      - name: Build portable local APT repository metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "/work/${BUNDLE_NAME}/repo"
+          dpkg-scanpackages --multiversion . /dev/null > Packages
+          gzip -9c Packages > Packages.gz
+          xz -9e -c Packages > Packages.xz
+          cat > ../README.txt <<EOF
+          Offline PikaOS package bundle: ${BUNDLE_NAME}
+
+          Packages were resolved using PikaOS's package universe configured by pinned
+          PikaOS builder revision ${PIKA_BASE_COMMIT}. Each .deb was independently
+          compared to the SHA-256 recorded in authenticated APT package metadata.
+
+          Install after extracting onto PikaOS:
+
+            echo 'deb [trusted=yes] file:/ABSOLUTE/PATH/TO/repo ./' | sudo tee /etc/apt/sources.list.d/local-${BUNDLE_NAME}.list
+            sudo apt update
+            sudo apt install \$(tr '\n' ' ' < /ABSOLUTE/PATH/TO/evidence/top-level-packages.txt)
+
+          The local repository uses trusted=yes only because the files themselves are
+          already pinned by evidence/SHA256SUMS and evidence/VERIFICATION.json; do not
+          use trusted=yes for arbitrary network repositories.
+          EOF
+          cp /tmp/apt-policy.txt ../evidence/apt-policy.txt
+          printf '%s\n' "$PIKA_BASE_COMMIT" > ../evidence/pika-base-builder-commit.txt
+          printf '%s\n' "$TOP_LEVEL_PACKAGES" > ../evidence/requested-packages-one-line.txt
+
+      - name: Verify local repository can resolve requested packages with network sources disabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/offline-lists/partial
+          cat > /tmp/offline.sources.list <<EOF
+          deb [trusted=yes] file:/work/${BUNDLE_NAME}/repo ./
+          EOF
+          apt-get \
+            -o Dir::Etc::sourcelist=/tmp/offline.sources.list \
+            -o Dir::Etc::sourceparts=- \
+            -o Dir::State::lists=/tmp/offline-lists \
+            update
+          apt-get \
+            -o Dir::Etc::sourcelist=/tmp/offline.sources.list \
+            -o Dir::Etc::sourceparts=- \
+            -o Dir::State::lists=/tmp/offline-lists \
+            --simulate install $TOP_LEVEL_PACKAGES | tee "/work/${BUNDLE_NAME}/evidence/offline-resolution.txt"
+
+      - name: Upload verified offline bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-verified
+          path: /work/${{ matrix.name }}/
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
