@@ -23,6 +23,7 @@ env:
   EXPECTED_CACHE_KEY: cachyos-lxqt-v4-47180113d766196dbf20615d2fb7c3098a49393faf61ca3b219a0836f0cd4a38
   SOURCE_RESOLUTION_RUN_ID: '31613260980'
   SOURCE_RESOLUTION_ARTIFACT: cachyos-lxqt-package-manifests-v4-31613260980
+  EXPORT_TAR: cachyos-lxqt-offline-repo-verified-1726.tar
 
 jobs:
   verify-and-export:
@@ -40,10 +41,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pacman -Sy --noconfirm --needed python libarchive coreutils
+          pacman -Sy --noconfirm --needed python libarchive coreutils tar
           python --version
           bsdtar --version
           sha256sum --version | head -n 1
+          tar --version | head -n 1
 
       - name: Download original Pacman resolution manifest
         uses: actions/download-artifact@v4
@@ -91,7 +93,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf export
+          rm -rf export downloadable
           mkdir -p export/cachyos-lxqt-offline-repo export/verification-source/pacman-sync-db
 
           python pipeline/tools/verify_cache_against_syncdb.py \
@@ -103,13 +105,12 @@ jobs:
             --report-json export/VERIFICATION.json
 
           # Hard-link the already-verified repository payloads into the export tree so
-          # we do not consume another ~5.4 GiB of runner disk before artifact upload.
+          # staging does not consume another ~5.4 GiB before the portable tar is made.
           cp -al "$CACHE_DIR"/. export/cachyos-lxqt-offline-repo/
           cp -a "$DB_DIR"/sync/*.db export/verification-source/pacman-sync-db/
           cp -a original-resolution/resolved-packages.tsv export/verification-source/
 
-          # Re-run the authoritative manifest against the actual files that will be
-          # uploaded, not merely against their source paths.
+          # Re-run the authoritative manifest against the exact export tree.
           (
             cd export/cachyos-lxqt-offline-repo
             sha256sum --strict --quiet -c UPSTREAM-SHA256SUMS
@@ -119,7 +120,7 @@ jobs:
           CachyOS LXQt offline package repository
           =======================================
 
-          This artifact contains the exact 1,726-package checkpoint used by the
+          This archive contains the exact 1,726-package checkpoint used by the
           custom CachyOS ISO work.
 
           Integrity evidence:
@@ -135,7 +136,7 @@ jobs:
           - cachyos-lxqt-offline-repo/SHA256SUMS is the separate post-download
             checkpoint manifest generated when the cache was first created.
 
-          To re-check after downloading:
+          To re-check after extracting:
             cd cachyos-lxqt-offline-repo
             sha256sum -c UPSTREAM-SHA256SUMS
 
@@ -156,12 +157,23 @@ jobs:
             echo "verification=all cached package SHA-256 values match the saved metadata of the exact repositories selected by the original Pacman resolution"
           } | tee export/EXPORT-SUMMARY.txt
 
-      - name: Upload verified offline repository
+      - name: Create portable tar preserving Arch package filenames
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p downloadable
+          tar -cf "downloadable/$EXPORT_TAR" -C export .
+          sha256sum "downloadable/$EXPORT_TAR" > "downloadable/$EXPORT_TAR.sha256"
+          test -s "downloadable/$EXPORT_TAR"
+          cat "downloadable/$EXPORT_TAR.sha256"
+          du -h "downloadable/$EXPORT_TAR"
+
+      - name: Upload verified offline repository tar
         id: upload
         uses: actions/upload-artifact@v4
         with:
           name: cachyos-lxqt-offline-repo-verified-1726
-          path: export/
+          path: downloadable/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
