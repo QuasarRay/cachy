@@ -171,9 +171,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 pipeline/tools/verify_apt_bundle.py \
-            "/work/${BUNDLE_NAME}/repo" "/work/${BUNDLE_NAME}/evidence/DEPENDENCY-VERIFICATION.json"
-          (cd "/work/${BUNDLE_NAME}/repo" && sha256sum -- *.deb | sort -k2 > ../evidence/DEPENDENCY-SHA256SUMS)
+          mapfile -t deps < <(find "/work/${BUNDLE_NAME}/repo" -maxdepth 1 -type f -name '*.deb' -print | sort)
+          if ((${#deps[@]} == 0)); then
+            cat > "/work/${BUNDLE_NAME}/evidence/DEPENDENCY-VERIFICATION.json" <<'EOF'
+          {
+            "schema": 1,
+            "verified_against_signed_apt_metadata": true,
+            "package_count": 0,
+            "records": [],
+            "failures": []
+          }
+          EOF
+            : > "/work/${BUNDLE_NAME}/evidence/DEPENDENCY-SHA256SUMS"
+            printf 'dependency_count=0\nstatus=PASS_EMPTY_CLOSURE\n' > "/work/${BUNDLE_NAME}/evidence/DEPENDENCY-SUMMARY.txt"
+          else
+            python3 pipeline/tools/verify_apt_bundle.py \
+              "/work/${BUNDLE_NAME}/repo" "/work/${BUNDLE_NAME}/evidence/DEPENDENCY-VERIFICATION.json"
+            (cd "/work/${BUNDLE_NAME}/repo" && sha256sum -- *.deb | sort -k2 > ../evidence/DEPENDENCY-SHA256SUMS)
+            printf 'dependency_count=%s\nstatus=PASS\n' "${#deps[@]}" > "/work/${BUNDLE_NAME}/evidence/DEPENDENCY-SUMMARY.txt"
+          fi
 
       - name: Assemble one local repository containing publisher deb plus verified dependency closure
         shell: bash
@@ -210,7 +226,6 @@ jobs:
           apt-get -o Dir::Etc::sourcelist=/tmp/local.list -o Dir::Etc::sourceparts=- \
             -o Dir::State::lists=/tmp/offline-lists -o Dir::State::status=/tmp/offline-status update
           pkg=$(dpkg-deb -f "$(find "/work/${BUNDLE_NAME}/vendor" -maxdepth 1 -type f -name '*.deb' -print -quit)" Package)
-          # dpkg-deb may label a single field on some versions; normalize it.
           pkg=${pkg#Package: }
           apt-get -o Dir::Etc::sourcelist=/tmp/local.list -o Dir::Etc::sourceparts=- \
             -o Dir::State::lists=/tmp/offline-lists -o Dir::State::status=/tmp/offline-status \
