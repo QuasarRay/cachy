@@ -40,9 +40,6 @@ jobs:
           - name: pika-tor-ecosystem
             packages: >-
               tor torsocks torbrowser-launcher obfs4proxy snowflake-client nyx proxychains4
-          - name: pika-vscode
-            packages: >-
-              code
 
     container:
       image: debian:sid
@@ -53,6 +50,9 @@ jobs:
       TOP_LEVEL_PACKAGES: ${{ matrix.packages }}
 
     steps:
+      - name: Checkout verifier source
+        uses: actions/checkout@v4
+
       - name: Bootstrap minimal tooling
         shell: bash
         run: |
@@ -76,6 +76,11 @@ jobs:
             "https://raw.githubusercontent.com/PikaOS-Linux/pika-base-debian-container/${PIKA_BASE_COMMIT}/deb-multimedia-keyring.gpg" \
             -o /tmp/deb-multimedia-keyring.gpg
           sha256sum /tmp/pika-setup.sh /tmp/pika-keyring.gpg.key /tmp/deb-multimedia-keyring.gpg
+
+          # The pinned setup script refers to its own main branch for key files. Rewrite
+          # only those self-references to this pinned revision so our configuration input
+          # cannot silently drift between runs.
+          sed -i "s#pika-base-debian-container/raw/main/#pika-base-debian-container/raw/${PIKA_BASE_COMMIT}/#g" /tmp/pika-setup.sh
           bash /tmp/pika-setup.sh
           apt-get update
           apt-cache policy | tee /tmp/apt-policy.txt
@@ -99,13 +104,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "/work/${BUNDLE_NAME}/repo"
-          # APT validates Release/InRelease signatures and package hashes while downloading.
           DEBIAN_FRONTEND=noninteractive apt-get \
             -o Dir::Cache::archives="/work/${BUNDLE_NAME}/repo" \
             -o APT::Keep-Downloaded-Packages=true \
             --download-only --yes install $TOP_LEVEL_PACKAGES
 
-          # Ensure every requested top-level package itself is physically present even if the base container already had it.
           cd "/work/${BUNDLE_NAME}/repo"
           for package in $TOP_LEVEL_PACKAGES; do
             apt-get download "$package"
@@ -120,8 +123,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp pipeline/tools/verify_apt_bundle.py /tmp/verify_apt_bundle.py
-          python3 /tmp/verify_apt_bundle.py \
+          python3 pipeline/tools/verify_apt_bundle.py \
             "/work/${BUNDLE_NAME}/repo" \
             "/work/${BUNDLE_NAME}/evidence/VERIFICATION.json"
           (
@@ -155,6 +157,9 @@ jobs:
           use trusted=yes for arbitrary network repositories.
           EOF
           cp /tmp/apt-policy.txt ../evidence/apt-policy.txt
+          cp /tmp/pika-setup.sh ../evidence/pika-setup-pinned.sh
+          sha256sum /tmp/pika-setup.sh /tmp/pika-keyring.gpg.key /tmp/deb-multimedia-keyring.gpg \
+            > ../evidence/pika-bootstrap-inputs.sha256
           printf '%s\n' "$PIKA_BASE_COMMIT" > ../evidence/pika-base-builder-commit.txt
           printf '%s\n' "$TOP_LEVEL_PACKAGES" > ../evidence/requested-packages-one-line.txt
 
@@ -162,6 +167,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf /tmp/offline-lists
           mkdir -p /tmp/offline-lists/partial
           cat > /tmp/offline.sources.list <<EOF
           deb [trusted=yes] file:/work/${BUNDLE_NAME}/repo ./
