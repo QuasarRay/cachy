@@ -1,0 +1,180 @@
+name: Build verified PikaOS Tor Browser runtime bundle
+
+on:
+  push:
+    branches: [agent/pika-offline-artifacts]
+    paths:
+      - '.github/workflows/build-pika-tor-browser-runtime.yml'
+      - 'pipeline/tools/verify_apt_bundle.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: debian:sid
+    env:
+      PIKA_BASE_COMMIT: f785f6c29c9b3917f08c6c9e21f04a1b37b8adc4
+      TOR_VERSION: 15.0.19
+      TOR_ARCHIVE: tor-browser-linux-x86_64-15.0.19.tar.xz
+      TOR_SIGNING_FINGERPRINT: EF6E286DDA85EA2A4BA7DE684E2C6E8793298290
+      RUNTIME_PACKAGES: >-
+        libc6 libstdc++6 libgcc-s1 libx11-xcb1 libx11-6 libxext6 libxrandr2
+        libasound2t64 libatk1.0-0t64 libcairo-gobject2 libcairo2 libdbus-1-3
+        libfontconfig1 libfreetype6 libgtk-3-0t64 libgdk-pixbuf-2.0-0
+        libglib2.0-0t64 libpango-1.0-0 libpangocairo-1.0-0 libxcb-shm0 libxcb1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bootstrap verification tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl wget gnupg debian-archive-keyring apt-transport-https \
+            dpkg-dev python3 gzip xz-utils zstd binutils
+
+      - name: Re-authenticate exact Tor Browser archive and derive host SONAME requirements
+        shell: bash
+        env:
+          GNUPGHOME: /work/tor/gnupg
+        run: |
+          set -euo pipefail
+          mkdir -p /work/tor/source /work/tor/evidence "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          base="https://dist.torproject.org/torbrowser/${TOR_VERSION}"
+          curl -fL --retry 5 "$base/$TOR_ARCHIVE" -o "/work/tor/source/$TOR_ARCHIVE"
+          curl -fL --retry 5 "$base/$TOR_ARCHIVE.asc" -o "/work/tor/source/$TOR_ARCHIVE.asc"
+          gpg --batch --auto-key-locate nodefault,wkd --locate-keys torbrowser@torproject.org
+          gpg --batch --with-colons --fingerprint torbrowser@torproject.org > /work/tor/evidence/key.txt
+          grep -Fq "fpr:::::::::${TOR_SIGNING_FINGERPRINT}:" /work/tor/evidence/key.txt
+          gpg --batch --status-fd 1 --verify "/work/tor/source/$TOR_ARCHIVE.asc" "/work/tor/source/$TOR_ARCHIVE" \
+            | tee /work/tor/evidence/gpg-status.txt
+          grep -Fq '[GNUPG:] VALIDSIG' /work/tor/evidence/gpg-status.txt
+          sha256sum "/work/tor/source/$TOR_ARCHIVE" | tee /work/tor/evidence/TOR-BROWSER-SHA256
+
+          mkdir -p /work/tor/extracted
+          tar -xJf "/work/tor/source/$TOR_ARCHIVE" -C /work/tor/extracted
+          browser=/work/tor/extracted/tor-browser/Browser
+          test -s "$browser/libxul.so"
+          readelf -d "$browser/libxul.so" \
+            | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' \
+            | sort -u > /work/tor/evidence/LIBXUL-NEEDED.txt
+          : > /work/tor/evidence/HOST-SONAMES.txt
+          : > /work/tor/evidence/BUNDLED-SONAMES.txt
+          while IFS= read -r soname; do
+            if find "$browser" -maxdepth 2 \( -type f -o -type l \) -name "$soname" -print -quit | grep -q .; then
+              echo "$soname" >> /work/tor/evidence/BUNDLED-SONAMES.txt
+            else
+              echo "$soname" >> /work/tor/evidence/HOST-SONAMES.txt
+            fi
+          done < /work/tor/evidence/LIBXUL-NEEDED.txt
+          {
+            echo "archive_sha256=$(sha256sum "/work/tor/source/$TOR_ARCHIVE" | cut -d' ' -f1)"
+            echo "signing_fingerprint=$TOR_SIGNING_FINGERPRINT"
+            echo 'detached_signature_verified=true'
+          } > /work/tor/evidence/TOR-AUTHENTICATION.txt
+          rm -rf "$GNUPGHOME"
+
+      - name: Configure pinned PikaOS package universe
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 \
+            "https://raw.githubusercontent.com/PikaOS-Linux/pika-base-debian-container/${PIKA_BASE_COMMIT}/setup.sh" \
+            -o /tmp/pika-setup.sh
+          sed -i "s#pika-base-debian-container/raw/main/#pika-base-debian-container/raw/${PIKA_BASE_COMMIT}/#g" /tmp/pika-setup.sh
+          bash /tmp/pika-setup.sh
+          apt-get update
+          apt-cache policy > /work/tor/evidence/pika-apt-policy.txt
+          sha256sum /tmp/pika-setup.sh /etc/apt/preferences.d/0-debian-exp-overrides \
+            > /work/tor/evidence/pika-resolution-inputs.sha256
+          for p in $RUNTIME_PACKAGES; do
+            apt-cache show "$p" >/dev/null || { echo "missing runtime package: $p" >&2; exit 1; }
+          done
+
+      - name: Resolve complete Tor Browser runtime closure from empty package state
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /work/tor/repo/partial
+          : > /tmp/empty-status
+          apt-get \
+            -o Dir::State::status=/tmp/empty-status \
+            -o Dir::Cache::archives=/work/tor/repo \
+            -o APT::Keep-Downloaded-Packages=true \
+            --download-only --yes install $RUNTIME_PACKAGES
+          rm -rf /work/tor/repo/partial /work/tor/repo/lock
+          printf '%s\n' $RUNTIME_PACKAGES > /work/tor/evidence/runtime-top-level-packages.txt
+
+      - name: Verify every runtime deb against authenticated APT metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 pipeline/tools/verify_apt_bundle.py \
+            /work/tor/repo /work/tor/evidence/VERIFICATION.json
+          (cd /work/tor/repo && sha256sum -- *.deb | sort -k2 > ../evidence/SHA256SUMS)
+
+      - name: Prove downloaded runtime packages provide every unbundled libxul SONAME
+        shell: bash
+        run: |
+          set -euo pipefail
+          root=/tmp/tor-runtime-root
+          rm -rf "$root"
+          mkdir -p "$root"
+          for deb in /work/tor/repo/*.deb; do
+            dpkg-deb -x "$deb" "$root"
+          done
+          : > /work/tor/evidence/SONAME-PROVIDERS.txt
+          missing=0
+          while IFS= read -r soname; do
+            provider=$(find "$root" \( -type f -o -type l \) -name "$soname" -print -quit || true)
+            if [ -z "$provider" ]; then
+              echo "MISSING $soname" | tee -a /work/tor/evidence/SONAME-PROVIDERS.txt
+              missing=1
+            else
+              echo "$soname -> ${provider#$root/}" >> /work/tor/evidence/SONAME-PROVIDERS.txt
+            fi
+          done < /work/tor/evidence/HOST-SONAMES.txt
+          test "$missing" -eq 0
+
+      - name: Build local repository and prove network-free resolution
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /work/tor/repo
+          dpkg-scanpackages --multiversion . /dev/null > Packages
+          gzip -9c Packages > Packages.gz
+          xz -9e -c Packages > Packages.xz
+          rm -rf /tmp/tor-offline-lists
+          mkdir -p /tmp/tor-offline-lists/partial
+          : > /tmp/tor-offline-status
+          echo 'deb [trusted=yes] file:/work/tor/repo ./' > /tmp/tor-local.list
+          apt-get -o Dir::Etc::sourcelist=/tmp/tor-local.list -o Dir::Etc::sourceparts=- \
+            -o Dir::State::lists=/tmp/tor-offline-lists -o Dir::State::status=/tmp/tor-offline-status update
+          apt-get -o Dir::Etc::sourcelist=/tmp/tor-local.list -o Dir::Etc::sourceparts=- \
+            -o Dir::State::lists=/tmp/tor-offline-lists -o Dir::State::status=/tmp/tor-offline-status \
+            --simulate install $RUNTIME_PACKAGES \
+            | tee /work/tor/evidence/OFFLINE-RESOLUTION.txt
+          cat > /work/tor/README.txt <<EOF
+          Tor Browser ${TOR_VERSION} PikaOS offline runtime bundle.
+          The included Tor Browser archive is re-authenticated by its detached Tor signature.
+          Every runtime .deb matches authenticated APT SHA-256 metadata.
+          SONAME-PROVIDERS.txt proves the downloaded runtime packages supply every libxul.so
+          dependency that is not bundled inside Tor Browser itself.
+          EOF
+
+      - name: Upload signed Tor Browser plus verified PikaOS runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: tor-browser-15.0.19-pika-runtime-verified
+          path: /work/tor/
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
