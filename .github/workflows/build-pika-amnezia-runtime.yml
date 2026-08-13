@@ -1,0 +1,135 @@
+name: Build verified PikaOS Amnezia runtime bundle
+
+on:
+  push:
+    branches: [agent/pika-offline-artifacts]
+    paths:
+      - '.github/workflows/build-pika-amnezia-runtime.yml'
+      - 'pipeline/tools/verify_apt_bundle.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: debian:sid
+    env:
+      PIKA_BASE_COMMIT: f785f6c29c9b3917f08c6c9e21f04a1b37b8adc4
+      AMNEZIA_VERSION: 4.8.21.0
+      AMNEZIA_ASSET: AmneziaVPN_4.8.21.0_linux_x64.tar
+      AMNEZIA_SHA256: bc214d824fc5a607b27f11a8a0c0f417657d03adba65d09f142244215842a7df
+      RUNTIME_PACKAGES: >-
+        libc6 zlib1g libbz2-1.0 liblzma5 libfontconfig1 libfreetype6 libdbus-1-3
+        libxcb-glx0 libx11-xcb1 libxcb-icccm4 libxcb-image0 libxcb-shm0 libxcb-util1
+        libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-render0 libxcb-shape0
+        libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0 libxcb-xkb1 libxcb1 libxext6 libx11-6
+        libxkbcommon-x11-0 libxkbcommon0 libgssapi-krb5-2 libgl1 libstdc++6 libgcc-s1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bootstrap verification tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl wget gnupg debian-archive-keyring apt-transport-https \
+            dpkg-dev python3 gzip xz-utils zstd binutils jq
+
+      - name: Re-verify official Amnezia publisher asset and record ELF requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /work/amnezia/evidence /work/amnezia/source
+          release="https://api.github.com/repos/amnezia-vpn/amnezia-client/releases/tags/${AMNEZIA_VERSION}"
+          curl -fL --retry 5 "$release" -o /work/amnezia/evidence/release.json
+          jq --arg n "$AMNEZIA_ASSET" -e '.assets[] | select(.name == $n)' \
+            /work/amnezia/evidence/release.json > /work/amnezia/evidence/asset.json
+          publisher=$(jq -r '.digest' /work/amnezia/evidence/asset.json)
+          size=$(jq -r '.size' /work/amnezia/evidence/asset.json)
+          test "$publisher" = "sha256:${AMNEZIA_SHA256}"
+          url=$(jq -r '.browser_download_url' /work/amnezia/evidence/asset.json)
+          curl -fL --retry 5 "$url" -o "/work/amnezia/source/${AMNEZIA_ASSET}"
+          actual=$(sha256sum "/work/amnezia/source/${AMNEZIA_ASSET}" | cut -d' ' -f1)
+          test "$actual" = "$AMNEZIA_SHA256"
+          test "$(stat -c %s "/work/amnezia/source/${AMNEZIA_ASSET}")" = "$size"
+          tar -xf "/work/amnezia/source/${AMNEZIA_ASSET}" -C /work/amnezia/source
+          test -x /work/amnezia/source/AmneziaVPN_Linux_Installer.bin
+          readelf -d /work/amnezia/source/AmneziaVPN_Linux_Installer.bin \
+            | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p' \
+            | sort -u | tee /work/amnezia/evidence/ELF-NEEDED.txt
+          {
+            echo "publisher_sha256=$AMNEZIA_SHA256"
+            echo "computed_sha256=$actual"
+            echo "publisher_size=$size"
+            echo 'publisher_asset_status=PASS'
+          } > /work/amnezia/evidence/AMNEZIA-ASSET-VERIFICATION.txt
+
+      - name: Configure PikaOS package universe
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 \
+            "https://raw.githubusercontent.com/PikaOS-Linux/pika-base-debian-container/${PIKA_BASE_COMMIT}/setup.sh" \
+            -o /tmp/pika-setup.sh
+          sed -i "s#pika-base-debian-container/raw/main/#pika-base-debian-container/raw/${PIKA_BASE_COMMIT}/#g" /tmp/pika-setup.sh
+          bash /tmp/pika-setup.sh
+          apt-get update
+          apt-cache policy > /work/amnezia/evidence/apt-policy.txt
+          sha256sum /tmp/pika-setup.sh /etc/apt/preferences.d/0-debian-exp-overrides \
+            > /work/amnezia/evidence/pika-resolution-inputs.sha256
+
+      - name: Resolve complete Amnezia runtime closure from empty package state
+        shell: bash
+        run: |
+          set -euo pipefail
+          for p in $RUNTIME_PACKAGES; do apt-cache show "$p" >/dev/null; done
+          mkdir -p /work/amnezia/repo/partial
+          : > /tmp/empty-status
+          apt-get \
+            -o Dir::State::status=/tmp/empty-status \
+            -o Dir::Cache::archives=/work/amnezia/repo \
+            -o APT::Keep-Downloaded-Packages=true \
+            --download-only --yes install $RUNTIME_PACKAGES
+          rm -rf /work/amnezia/repo/partial /work/amnezia/repo/lock
+          printf '%s\n' $RUNTIME_PACKAGES > /work/amnezia/evidence/runtime-top-level-packages.txt
+
+      - name: Verify every runtime deb against authenticated APT metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 pipeline/tools/verify_apt_bundle.py \
+            /work/amnezia/repo /work/amnezia/evidence/VERIFICATION.json
+          (cd /work/amnezia/repo && sha256sum -- *.deb | sort -k2 > ../evidence/SHA256SUMS)
+          cd /work/amnezia/repo
+          dpkg-scanpackages --multiversion . /dev/null > Packages
+          gzip -9c Packages > Packages.gz
+          xz -9e -c Packages > Packages.xz
+
+      - name: Prove runtime repository resolves with no installed packages and no network source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/lists/partial
+          : > /tmp/empty-offline-status
+          echo 'deb [trusted=yes] file:/work/amnezia/repo ./' > /tmp/local.list
+          apt-get -o Dir::Etc::sourcelist=/tmp/local.list -o Dir::Etc::sourceparts=- \
+            -o Dir::State::lists=/tmp/lists -o Dir::State::status=/tmp/empty-offline-status update
+          apt-get -o Dir::Etc::sourcelist=/tmp/local.list -o Dir::Etc::sourceparts=- \
+            -o Dir::State::lists=/tmp/lists -o Dir::State::status=/tmp/empty-offline-status \
+            --simulate install $RUNTIME_PACKAGES \
+            | tee /work/amnezia/evidence/offline-resolution-empty-state.txt
+
+      - name: Upload Amnezia PikaOS runtime bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: amnezia-4.8.21.0-pika-runtime-verified
+          path: /work/amnezia/
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
