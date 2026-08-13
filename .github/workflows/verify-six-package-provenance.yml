@@ -29,7 +29,7 @@ jobs:
       - name: Download exact Amnezia source-build checkpoint
         uses: actions/download-artifact@v4
         with:
-          name: amnezia-source-build
+          name: amnezia-linux-source-built-locked
           path: amnezia-source
           github-token: ${{ github.token }}
           run-id: 31614038706
