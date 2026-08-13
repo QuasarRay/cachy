@@ -1,0 +1,226 @@
+name: Build dependency-closed PikaOS bundles for upstream debs
+
+on:
+  push:
+    branches: [agent/pika-offline-artifacts]
+    paths:
+      - '.github/workflows/build-pika-upstream-deb-offline-bundles.yml'
+      - 'pipeline/tools/verify_apt_bundle.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: debian:sid
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windscribe-gui-2.23.12-pika-offline
+            kind: github
+            repo: Windscribe/Desktop-App
+            tag: v2.23.12
+            asset: windscribe_2.23.12_amd64.deb
+            require_release_body_hash: 'true'
+          - name: windscribe-cli-2.23.12-pika-offline
+            kind: github
+            repo: Windscribe/Desktop-App
+            tag: v2.23.12
+            asset: windscribe-cli_2.23.12_amd64.deb
+            require_release_body_hash: 'true'
+          - name: sing-box-1.13.18-pika-offline
+            kind: github
+            repo: SagerNet/sing-box
+            tag: v1.13.18
+            asset: sing-box_1.13.18_linux_amd64.deb
+            require_release_immutable: 'true'
+          - name: vscode-stable-pika-offline
+            kind: microsoft-vscode
+            repo: ''
+            tag: ''
+            asset: ''
+
+    env:
+      PIKA_BASE_COMMIT: f785f6c29c9b3917f08c6c9e21f04a1b37b8adc4
+      BUNDLE_NAME: ${{ matrix.name }}
+      KIND: ${{ matrix.kind }}
+      GH_REPO: ${{ matrix.repo }}
+      GH_TAG: ${{ matrix.tag }}
+      GH_ASSET: ${{ matrix.asset }}
+      REQUIRE_RELEASE_BODY_HASH: ${{ matrix.require_release_body_hash }}
+      REQUIRE_RELEASE_IMMUTABLE: ${{ matrix.require_release_immutable }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bootstrap verifier tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl wget gnupg debian-archive-keyring apt-transport-https \
+            dpkg-dev python3 gzip xz-utils zstd jq
+          mkdir -p "/work/${BUNDLE_NAME}/vendor" "/work/${BUNDLE_NAME}/repo/partial" "/work/${BUNDLE_NAME}/evidence"
+
+      - name: Fetch and authenticate exact publisher deb
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$KIND" = github ]; then
+            curl -fL --retry 5 "https://api.github.com/repos/${GH_REPO}/releases/tags/${GH_TAG}" \
+              -o "/work/${BUNDLE_NAME}/evidence/release.json"
+            jq --arg n "$GH_ASSET" -e '.assets[] | select(.name == $n)' \
+              "/work/${BUNDLE_NAME}/evidence/release.json" > "/work/${BUNDLE_NAME}/evidence/asset.json"
+            if [ "${REQUIRE_RELEASE_IMMUTABLE:-}" = true ]; then
+              jq -e '.immutable == true' "/work/${BUNDLE_NAME}/evidence/release.json" >/dev/null
+            fi
+            url=$(jq -r '.browser_download_url' "/work/${BUNDLE_NAME}/evidence/asset.json")
+            publisher=$(jq -r '.digest' "/work/${BUNDLE_NAME}/evidence/asset.json")
+            size=$(jq -r '.size' "/work/${BUNDLE_NAME}/evidence/asset.json")
+            test "${publisher#sha256:}" != "$publisher"
+            curl -fL --retry 5 "$url" -o "/work/${BUNDLE_NAME}/vendor/${GH_ASSET}"
+            actual=$(sha256sum "/work/${BUNDLE_NAME}/vendor/${GH_ASSET}" | cut -d' ' -f1)
+            test "$actual" = "${publisher#sha256:}"
+            test "$(stat -c %s "/work/${BUNDLE_NAME}/vendor/${GH_ASSET}")" = "$size"
+            if [ "${REQUIRE_RELEASE_BODY_HASH:-}" = true ]; then
+              jq -r '.body' "/work/${BUNDLE_NAME}/evidence/release.json" | grep -Fqi "$actual"
+            fi
+            {
+              echo "publisher_sha256=${publisher#sha256:}"
+              echo "computed_sha256=$actual"
+              echo "publisher_size=$size"
+              echo 'publisher_status=PASS'
+            } > "/work/${BUNDLE_NAME}/evidence/VENDOR-VERIFICATION.txt"
+          elif [ "$KIND" = microsoft-vscode ]; then
+            curl -fL --retry 5 https://packages.microsoft.com/keys/microsoft.asc \
+              -o "/work/${BUNDLE_NAME}/evidence/microsoft.asc"
+            gpg --batch --with-colons --show-keys --fingerprint "/work/${BUNDLE_NAME}/evidence/microsoft.asc" \
+              > "/work/${BUNDLE_NAME}/evidence/microsoft-key.txt"
+            expected='BC528686B50D79E339D3721CEB3E94ADBE1229CF'
+            grep -Fq "fpr:::::::::${expected}:" "/work/${BUNDLE_NAME}/evidence/microsoft-key.txt"
+            gpg --batch --dearmor < "/work/${BUNDLE_NAME}/evidence/microsoft.asc" > /usr/share/keyrings/microsoft-vscode.gpg
+            cat > /etc/apt/sources.list.d/vscode.sources <<'EOF'
+          Types: deb
+          URIs: https://packages.microsoft.com/repos/code
+          Suites: stable
+          Components: main
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/microsoft-vscode.gpg
+          EOF
+            apt-get update
+            version=$(apt-cache policy code | awk '/Candidate:/{print $2; exit}')
+            test -n "$version"; test "$version" != '(none)'
+            cd "/work/${BUNDLE_NAME}/vendor"
+            apt-get download "code=$version"
+            deb=$(find . -maxdepth 1 -type f -name 'code_*.deb' -print -quit)
+            test -n "$deb"
+            actual=$(sha256sum "$deb" | cut -d' ' -f1)
+            metadata=$(apt-cache show "code=$version" | awk '/^SHA256:/{print $2; exit}')
+            test -n "$metadata"; test "$actual" = "$metadata"
+            {
+              echo "version=$version"
+              echo "authenticated_microsoft_apt_sha256=$metadata"
+              echo "computed_sha256=$actual"
+              echo "microsoft_key_fingerprint=$expected"
+              echo 'publisher_status=PASS'
+            } > "/work/${BUNDLE_NAME}/evidence/VENDOR-VERIFICATION.txt"
+            rm -f /etc/apt/sources.list.d/vscode.sources
+          else
+            echo "unknown KIND=$KIND" >&2
+            exit 1
+          fi
+          vendor_deb=$(find "/work/${BUNDLE_NAME}/vendor" -maxdepth 1 -type f -name '*.deb' -print -quit)
+          test -n "$vendor_deb"
+          dpkg-deb -f "$vendor_deb" Package Version Architecture \
+            > "/work/${BUNDLE_NAME}/evidence/vendor-control.txt"
+
+      - name: Configure pinned PikaOS package universe
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 5 \
+            "https://raw.githubusercontent.com/PikaOS-Linux/pika-base-debian-container/${PIKA_BASE_COMMIT}/setup.sh" \
+            -o /tmp/pika-setup.sh
+          sed -i "s#pika-base-debian-container/raw/main/#pika-base-debian-container/raw/${PIKA_BASE_COMMIT}/#g" /tmp/pika-setup.sh
+          bash /tmp/pika-setup.sh
+          apt-get update
+          apt-cache policy > "/work/${BUNDLE_NAME}/evidence/pika-apt-policy.txt"
+          sha256sum /tmp/pika-setup.sh /etc/apt/preferences.d/0-debian-exp-overrides \
+            > "/work/${BUNDLE_NAME}/evidence/pika-resolution-inputs.sha256"
+
+      - name: Resolve PikaOS dependencies from empty package state
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/empty-status
+          vendor_deb=$(find "/work/${BUNDLE_NAME}/vendor" -maxdepth 1 -type f -name '*.deb' -print -quit)
+          apt-get \
+            -o Dir::State::status=/tmp/empty-status \
+            -o Dir::Cache::archives="/work/${BUNDLE_NAME}/repo" \
+            -o APT::Keep-Downloaded-Packages=true \
+            --download-only --yes install "$vendor_deb"
+          rm -rf "/work/${BUNDLE_NAME}/repo/partial" "/work/${BUNDLE_NAME}/repo/lock"
+
+      - name: Verify every repository dependency against authenticated APT SHA256 metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 pipeline/tools/verify_apt_bundle.py \
+            "/work/${BUNDLE_NAME}/repo" "/work/${BUNDLE_NAME}/evidence/DEPENDENCY-VERIFICATION.json"
+          (cd "/work/${BUNDLE_NAME}/repo" && sha256sum -- *.deb | sort -k2 > ../evidence/DEPENDENCY-SHA256SUMS)
+
+      - name: Assemble one local repository containing publisher deb plus verified dependency closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "/work/${BUNDLE_NAME}/vendor"/*.deb "/work/${BUNDLE_NAME}/repo/"
+          cd "/work/${BUNDLE_NAME}/repo"
+          sha256sum -- *.deb | sort -k2 > ../evidence/COMPLETE-REPO-SHA256SUMS
+          dpkg-scanpackages --multiversion . /dev/null > Packages
+          gzip -9c Packages > Packages.gz
+          xz -9e -c Packages > Packages.xz
+          vendor=$(basename "$(find ../vendor -maxdepth 1 -type f -name '*.deb' -print -quit)")
+          cat > ../README.txt <<EOF
+          Dependency-closed PikaOS offline application bundle: ${BUNDLE_NAME}
+
+          The application .deb is preserved byte-for-byte from its authenticated
+          publisher source. Repository dependencies are PikaOS/Debian packages whose
+          bytes were independently matched to authenticated APT SHA-256 metadata.
+
+          To install offline after extracting:
+            echo 'deb [trusted=yes] file:/ABSOLUTE/PATH/TO/repo ./' | sudo tee /etc/apt/sources.list.d/local-${BUNDLE_NAME}.list
+            sudo apt update
+            sudo apt install ./repo/${vendor}
+          EOF
+
+      - name: Prove application resolves from local repository only and empty package state
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/offline-lists
+          mkdir -p /tmp/offline-lists/partial
+          : > /tmp/offline-status
+          echo "deb [trusted=yes] file:/work/${BUNDLE_NAME}/repo ./" > /tmp/local.list
+          apt-get -o Dir::Etc::sourcelist=/tmp/local.list -o Dir::Etc::sourceparts=- \
+            -o Dir::State::lists=/tmp/offline-lists -o Dir::State::status=/tmp/offline-status update
+          pkg=$(dpkg-deb -f "$(find "/work/${BUNDLE_NAME}/vendor" -maxdepth 1 -type f -name '*.deb' -print -quit)" Package)
+          # dpkg-deb may label a single field on some versions; normalize it.
+          pkg=${pkg#Package: }
+          apt-get -o Dir::Etc::sourcelist=/tmp/local.list -o Dir::Etc::sourceparts=- \
+            -o Dir::State::lists=/tmp/offline-lists -o Dir::State::status=/tmp/offline-status \
+            --simulate install "$pkg" | tee "/work/${BUNDLE_NAME}/evidence/OFFLINE-RESOLUTION.txt"
+
+      - name: Upload dependency-closed verified application bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-verified
+          path: /work/${{ matrix.name }}/
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
