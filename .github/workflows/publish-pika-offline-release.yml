@@ -1,0 +1,92 @@
+name: Publish stable PikaOS offline artifact downloads
+
+on:
+  push:
+    branches: [agent/pika-offline-artifacts]
+    paths:
+      - '.github/workflows/publish-pika-offline-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: pikaos-offline-2026-08-13
+      REPO: QuasarRay/cachy
+    steps:
+      - name: Create or reuse release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "$REPO" \
+              --target "$GITHUB_SHA" \
+              --title "PikaOS offline verified artifacts — 2026-08-13" \
+              --notes "Stable direct-download mirrors of the previously verified GitHub Actions artifacts. Each ZIP is checked against the recorded GitHub Actions wrapper SHA-256 before upload."
+          fi
+
+      - name: Download, verify, and publish artifacts sequentially
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/artifacts.tsv <<'EOF'
+          9169927721	bc7370b71bc84ce9251908b6e7cfd8bb4a43becddeb978b16640874100512926	pika-dev-toolchains-verified.zip
+          9169925027	fae4a09e430d5c35e911a48e3f9891a46fc025d4dae5de72426e36bcfb8b16dc	pika-containers-ansible-verified.zip
+          9169889971	f06ecab70f20f5849eaeded70d56293420cde359da33fe6dcb001aabf93f4bf8	pika-kvm-qemu-libvirt-verified.zip
+          9169873292	f461bf97b76579fe2129859db4e0a709dd389808db7f1e327500b3a2102822ab	pika-xonsh-starship-cli-verified.zip
+          9169876597	622aa8faff702711746cab3286f8930130f1a650dba4226dd0d823c8944252b4	pika-tor-ecosystem-verified.zip
+          9170083567	d5733c383eec665ad24c6cbc3ff639d51456db73b534e96cde87be0d04a73a08	tor-browser-15.0.19-pika-runtime-verified.zip
+          9169891510	eae0e4984eee7b5ebfc791d12e99b5eb8e99ebc3ed6ff2ac601a83871965ab6a	windscribe-gui-2.23.12-pika-offline-verified.zip
+          9169903808	ceb85ba60a939f3bbce5c2ab935582cc5ce1478019c3326a75b27149ff9df46a	windscribe-cli-2.23.12-pika-offline-verified.zip
+          9169905100	558343363384aecb170b1bdc62cffbc448c6b6787ddf6067f5479cbd0cee775b	sing-box-1.13.18-pika-offline-verified.zip
+          9169908502	01ab96ff22f61bcc73ba626b5e7fba5286c288a8a25aa7867ab5f4515f1ed6e4	vscode-stable-pika-offline-verified.zip
+          9169915520	7dc3795c99c61d3c2b28fb86c94f36d1a34dff871af224316ac013362d05fbe8	amnezia-4.8.21.0-pika-runtime-verified.zip
+          9169602016	dbe18eda3dd7c6983d45700b7c946eeffc01a652b92ff1778ba3deee481d1c2f	xray-26.3.27-linux-64-publisher-verified.zip
+          EOF
+
+          : > SHA256SUMS-ACTIONS-WRAPPERS
+          while IFS=$'\t' read -r artifact_id expected filename; do
+            echo "Downloading artifact ${artifact_id} -> ${filename}"
+            curl --fail --location --retry 5 --retry-all-errors \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2026-03-10" \
+              "https://api.github.com/repos/${REPO}/actions/artifacts/${artifact_id}/zip" \
+              -o "$filename"
+            actual=$(sha256sum "$filename" | awk '{print $1}')
+            test "$actual" = "$expected"
+            printf '%s  %s\n' "$actual" "$filename" >> SHA256SUMS-ACTIONS-WRAPPERS
+            gh release upload "$RELEASE_TAG" "$filename" --repo "$REPO" --clobber
+            rm -f "$filename"
+          done < /tmp/artifacts.tsv
+
+          gh release upload "$RELEASE_TAG" SHA256SUMS-ACTIONS-WRAPPERS --repo "$REPO" --clobber
+
+      - name: Publish plain direct-download URL list
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
+          cat > PIKAOS-OFFLINE-DIRECT-DOWNLOADS.txt <<EOF
+          ${base}/pika-dev-toolchains-verified.zip
+          ${base}/pika-containers-ansible-verified.zip
+          ${base}/pika-kvm-qemu-libvirt-verified.zip
+          ${base}/pika-xonsh-starship-cli-verified.zip
+          ${base}/pika-tor-ecosystem-verified.zip
+          ${base}/tor-browser-15.0.19-pika-runtime-verified.zip
+          ${base}/windscribe-gui-2.23.12-pika-offline-verified.zip
+          ${base}/windscribe-cli-2.23.12-pika-offline-verified.zip
+          ${base}/sing-box-1.13.18-pika-offline-verified.zip
+          ${base}/vscode-stable-pika-offline-verified.zip
+          ${base}/amnezia-4.8.21.0-pika-runtime-verified.zip
+          ${base}/xray-26.3.27-linux-64-publisher-verified.zip
+          EOF
+          gh release upload "$RELEASE_TAG" PIKAOS-OFFLINE-DIRECT-DOWNLOADS.txt --repo "$REPO" --clobber
