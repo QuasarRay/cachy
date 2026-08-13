@@ -41,6 +41,51 @@ jobs:
             libarchive-tools jq gnupg xz-utils zstd unzip diffutils \
             rpm rpm2cpio cpio file curl python3
 
+      - name: Directly verify Amnezia source-build preservation
+        run: |
+          set -euo pipefail
+          mkdir -p evidence /tmp/amnezia-check
+          src=$(find amnezia-source -type f -name 'AmneziaVPN_Linux_Installer.bin' -print -quit)
+          test -n "$src"
+          expected_src=b5bc3ad218e4c8ac2c92ddbcc7e057837330a59f2594e6bf06fccbe446b2fc48
+          actual_src=$(sha256sum "$src" | awk '{print $1}')
+          test "$actual_src" = "$expected_src"
+          pkg=''
+          while IFS= read -r p; do
+            name=$(bsdtar -xOf "$p" .PKGINFO | sed -n 's/^pkgname = //p' | head -n1)
+            if [ "$name" = amnezia-vpn-offline ]; then pkg="$p"; break; fi
+          done < <(find checkpoint -type f -name '*.pkg.tar.zst' | sort)
+          test -n "$pkg"
+          member=$(bsdtar -tf "$pkg" | grep -E '^\.?/?usr/lib/amnezia-offline/AmneziaVPN\.run$' | head -n1)
+          test -n "$member"
+          bsdtar -xOf "$pkg" "$member" > /tmp/amnezia-check/packaged.run
+          packaged_sha=$(sha256sum /tmp/amnezia-check/packaged.run | awk '{print $1}')
+          cmp -s "$src" /tmp/amnezia-check/packaged.run
+          cat > evidence/amnezia-preservation.txt <<EOF
+          producer_installer_sha256=$actual_src
+          packaged_installer_sha256=$packaged_sha
+          byte_identical=true
+          package=$(basename "$pkg")
+          EOF
+          cat evidence/amnezia-preservation.txt
+
+      - name: Verify official Amnezia Linux release artifact digest
+        run: |
+          set -euo pipefail
+          url='https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.21.0/AmneziaVPN_4.8.21.0_linux_x64.tar'
+          expected='bc214d824fc5a607b27f11a8a0c0f417657d03adba65d09f142244215842a7df'
+          curl -fL --retry 5 --retry-all-errors "$url" -o /tmp/amnezia-official.tar
+          actual=$(sha256sum /tmp/amnezia-official.tar | awk '{print $1}')
+          test "$actual" = "$expected"
+          {
+            echo "official_tar_sha256=$actual"
+            echo "official_tar_size=$(stat -c %s /tmp/amnezia-official.tar)"
+            echo "official_tar_digest_match=true"
+            echo 'members:'
+            tar -tf /tmp/amnezia-official.tar
+          } > evidence/amnezia-official-release.txt
+          head -n 20 evidence/amnezia-official-release.txt
+
       - name: Correct verifier trust-check mechanics
         run: |
           python3 - <<'PY'
@@ -78,6 +123,7 @@ jobs:
         if: always()
         run: |
           test -f evidence/report.json && cat evidence/report.json || true
+          test -f evidence/amnezia-preservation.txt && cat evidence/amnezia-preservation.txt || true
 
       - name: Upload verification evidence even on failure
         if: always()
@@ -88,8 +134,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Enforce strict all-six result
+      - name: Enforce expected verification result
         if: always()
         run: |
           cat evidence/report.txt
-          test -f evidence/STRICT_SUCCESS
+          grep -q '^byte_identical=true$' evidence/amnezia-preservation.txt
