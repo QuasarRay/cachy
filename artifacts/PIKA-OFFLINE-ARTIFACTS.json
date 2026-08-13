@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "generated_from_commit": "ea5a826c66dc17e18d5ca0e5e0effda7d5253caa",
+  "notes": [
+    "actions_artifact_digest is the SHA-256 of GitHub's Actions ZIP wrapper, not the publisher payload inside it.",
+    "APT-backed bundles contain VERIFICATION.json and SHA256SUMS evidence for the .deb payloads.",
+    "Dependency-closed bundles were resolved and simulated from an empty dpkg status database with network APT sources disabled during the final resolution check.",
+    "Publisher-direct artifacts preserve exact upstream bytes and verify them against publisher digest or signature evidence.",
+    "GitHub Actions artifacts are temporary; download/archive required artifacts before expires_at."
+  ],
+  "preferred_offline_install_bundles": [
+    {
+      "category": "development-toolchains",
+      "name": "pika-dev-toolchains-verified",
+      "artifact_id": 9169927721,
+      "run_id": 31671496279,
+      "size_bytes": 1138576614,
+      "actions_artifact_digest": "sha256:bc7370b71bc84ce9251908b6e7cfd8bb4a43becddeb978b16640874100512926",
+      "expires_at": "2026-09-12T05:50:25Z",
+      "trust": "complete empty-state PikaOS APT closure; every .deb SHA-256 matched authenticated APT metadata; local-only install simulation passed",
+      "top_level": ["build-essential", "gcc", "g++", "clang", "clangd", "lldb", "llvm", "cmake", "ninja-build", "meson", "pkg-config", "gdb", "valgrind", "ccache", "rustc", "cargo", "golang-go", "default-jdk", "maven", "gradle", "nodejs", "npm", "python3", "python3-dev", "python3-venv", "python3-pip", "pipx", "git", "git-lfs"]
+    },
+    {
+      "category": "containers-ansible",
+      "name": "pika-containers-ansible-verified",
+      "artifact_id": 9169925027,
+      "run_id": 31671496279,
+      "size_bytes": 380390649,
+      "actions_artifact_digest": "sha256:fae4a09e430d5c35e911a48e3f9891a46fc025d4dae5de72426e36bcfb8b16dc",
+      "expires_at": "2026-09-12T05:50:24Z",
+      "trust": "complete empty-state PikaOS APT closure; every .deb SHA-256 matched authenticated APT metadata; local-only install simulation passed",
+      "top_level": ["docker.io", "docker-cli", "docker-buildx", "docker-compose", "podman", "podman-compose", "buildah", "skopeo", "containerd", "runc", "ansible", "ansible-core", "ansible-lint", "yamllint", "sshpass", "python3-jmespath", "python3-netaddr"]
+    },
+    {
+      "category": "virtualization",
+      "name": "pika-kvm-qemu-libvirt-verified",
+      "artifact_id": 9169889971,
+      "run_id": 31671496279,
+      "size_bytes": 561964837,
+      "actions_artifact_digest": "sha256:f06ecab70f20f5849eaeded70d56293420cde359da33fe6dcb001aabf93f4bf8",
+      "expires_at": "2026-09-12T05:48:44Z",
+      "trust": "complete empty-state PikaOS APT closure; every .deb SHA-256 matched authenticated APT metadata; local-only install simulation passed",
+      "top_level": ["qemu-system-x86", "qemu-utils", "qemu-system-gui", "libvirt-daemon-system", "libvirt-clients", "virt-manager", "virt-viewer", "ovmf", "swtpm", "bridge-utils", "dnsmasq-base", "libguestfs-tools", "spice-client-gtk"]
+    },
+    {
+      "category": "shell-cli",
+      "name": "pika-xonsh-starship-cli-verified",
+      "artifact_id": 9169873292,
+      "run_id": 31671496279,
+      "size_bytes": 64002006,
+      "actions_artifact_digest": "sha256:f461bf97b76579fe2129859db4e0a709dd389808db7f1e327500b3a2102822ab",
+      "expires_at": "2026-09-12T05:47:57Z",
+      "trust": "complete empty-state PikaOS APT closure; every .deb SHA-256 matched authenticated APT metadata; local-only install simulation passed",
+      "top_level": ["xonsh", "starship", "fzf", "ripgrep", "fd-find", "bat", "tmux", "zoxide", "jq", "curl", "wget"]
+    },
+    {
+      "category": "tor-system-ecosystem",
+      "name": "pika-tor-ecosystem-verified",
+      "artifact_id": 9169876597,
+      "run_id": 31671496279,
+      "size_bytes": 225106207,
+      "actions_artifact_digest": "sha256:622aa8faff702711746cab3286f8930130f1a650dba4226dd0d823c8944252b4",
+      "expires_at": "2026-09-12T05:48:06Z",
+      "trust": "complete empty-state PikaOS APT closure; every .deb SHA-256 matched authenticated APT metadata; local-only install simulation passed",
+      "top_level": ["tor", "torsocks", "torbrowser-launcher", "obfs4proxy", "snowflake-client", "nyx", "proxychains4"]
+    },
+    {
+      "category": "windscribe-gui",
+      "name": "windscribe-gui-2.23.12-pika-offline-verified",
+      "artifact_id": 9169891510,
+      "run_id": 31671496331,
+      "size_bytes": 199563451,
+      "actions_artifact_digest": "sha256:eae0e4984eee7b5ebfc791d12e99b5eb8e99ebc3ed6ff2ac601a83871965ab6a",
+      "expires_at": "2026-11-11T05:46:49Z",
+      "trust": "Windscribe publisher .deb preserved exactly and authenticated by GitHub asset digest plus release-body hash; complete PikaOS dependency closure authenticated and local-only install simulation passed"
+    },
+    {
+      "category": "windscribe-cli",
+      "name": "windscribe-cli-2.23.12-pika-offline-verified",
+      "artifact_id": 9169903808,
+      "run_id": 31671496331,
+      "size_bytes": 97563635,
+      "actions_artifact_digest": "sha256:ceb85ba60a939f3bbce5c2ab935582cc5ce1478019c3326a75b27149ff9df46a",
+      "expires_at": "2026-11-11T05:46:49Z",
+      "trust": "Windscribe publisher .deb preserved exactly and authenticated by GitHub asset digest plus release-body hash; complete PikaOS dependency closure authenticated and local-only install simulation passed"
+    },
+    {
+      "category": "sing-box",
+      "name": "sing-box-1.13.18-pika-offline-verified",
+      "artifact_id": 9169905100,
+      "run_id": 31671496331,
+      "size_bytes": 49513147,
+      "actions_artifact_digest": "sha256:558343363384aecb170b1bdc62cffbc448c6b6787ddf6067f5479cbd0cee775b",
+      "expires_at": "2026-11-11T05:46:49Z",
+      "trust": "exact immutable publisher .deb matched GitHub publisher SHA-256; zero external dependencies explicitly verified; local-only empty-state install simulation passed"
+    },
+    {
+      "category": "vscode",
+      "name": "vscode-stable-pika-offline-verified",
+      "artifact_id": 9169908502,
+      "run_id": 31671496331,
+      "size_bytes": 734584443,
+      "actions_artifact_digest": "sha256:01ab96ff22f61bcc73ba626b5e7fba5286c288a8a25aa7867ab5f4515f1ed6e4",
+      "expires_at": "2026-11-11T05:46:49Z",
+      "trust": "exact Microsoft .deb matched SHA-256 in Microsoft signed APT metadata under pinned Microsoft key fingerprint; complete PikaOS dependency closure authenticated and local-only install simulation passed"
+    },
+    {
+      "category": "amnezia-runtime",
+      "name": "amnezia-4.8.21.0-pika-runtime-verified",
+      "artifact_id": 9169915520,
+      "run_id": 31671496367,
+      "size_bytes": 342705094,
+      "actions_artifact_digest": "sha256:7dc3795c99c61d3c2b28fb86c94f36d1a34dff871af224316ac013362d05fbe8",
+      "expires_at": "2026-11-11T05:46:49Z",
+      "trust": "official Amnezia Linux tar re-verified against publisher SHA-256; ELF runtime requirements recorded; PikaOS runtime closure authenticated and local-only empty-state resolution passed"
+    }
+  ],
+  "publisher_direct_provenance_artifacts": [
+    {
+      "category": "amnezia-publisher-payload",
+      "name": "amnezia-official-linux-x64-4.8.21.0-sha256-verified",
+      "artifact_id": 9167525365,
+      "run_id": 31664854077,
+      "size_bytes": 115608906,
+      "actions_artifact_digest": "sha256:e06c01f70ca10f2313162094ee94a62507dd1049d759a342876b76fb58381b7c",
+      "expires_at": "2026-11-11T03:44:59Z",
+      "payload": "AmneziaVPN_4.8.21.0_linux_x64.tar",
+      "publisher_payload_sha256": "bc214d824fc5a607b27f11a8a0c0f417657d03adba65d09f142244215842a7df"
+    },
+    {
+      "category": "tor-browser",
+      "name": "tor-browser-15.0.19-linux-x86_64-signature-verified",
+      "artifact_id": 9169606066,
+      "run_id": 31670790436,
+      "size_bytes": 137886515,
+      "actions_artifact_digest": "sha256:59fa99280ecc9e20e65baa2293d8227af0898c11b86fb8cb5104bbe18fc48240",
+      "expires_at": "2026-11-11T05:34:39Z",
+      "payload": "tor-browser-linux-x86_64-15.0.19.tar.xz",
+      "payload_sha256": "2eb4ab431f4921ca63b123b6f9f445a073fbf7b65f188f45a577d576eb2be2cf",
+      "tor_browser_developers_primary_fingerprint": "EF6E286DDA85EA2A4BA7DE684E2C6E8793298290",
+      "trust": "detached OpenPGP signature valid under explicitly pinned Tor Browser Developers fingerprint"
+    },
+    {
+      "category": "xray",
+      "name": "xray-26.3.27-linux-64-publisher-verified",
+      "artifact_id": 9169602016,
+      "run_id": 31670790436,
+      "size_bytes": 21283864,
+      "actions_artifact_digest": "sha256:dbe18eda3dd7c6983d45700b7c946eeffc01a652b92ff1778ba3deee481d1c2f",
+      "expires_at": "2026-11-11T05:34:39Z",
+      "payload": "Xray-linux-64.zip",
+      "publisher_payload_sha256": "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae",
+      "trust": "computed ZIP SHA-256 matched GitHub publisher asset digest and the independent SHA2-256 value inside Xray's publisher .dgst companion asset"
+    },
+    {
+      "category": "windscribe-provenance-only",
+      "name": "windscribe-2.23.12-amd64-debs-publisher-verified",
+      "artifact_id": 9169603015,
+      "run_id": 31670790436,
+      "size_bytes": 57280994,
+      "actions_artifact_digest": "sha256:c746fe2f3d020f64c38a13ad0ab07f7f0046a6bd29b813e8f3a4c7f3fc6b07fb",
+      "expires_at": "2026-11-11T05:34:39Z",
+      "trust": "exact publisher .deb files; prefer the dependency-closed Windscribe artifacts for offline installation"
+    },
+    {
+      "category": "sing-box-provenance-only",
+      "name": "sing-box-1.13.18-linux-amd64-deb-publisher-verified",
+      "artifact_id": 9169601381,
+      "run_id": 31670790436,
+      "size_bytes": 24907660,
+      "actions_artifact_digest": "sha256:d319b8dece62b760d881e1162dd9169cfb411436580b7460cc213b172a63bed9",
+      "expires_at": "2026-11-11T05:34:39Z",
+      "publisher_payload_sha256": "c011a13c48e1fe66e39973b1dd7ec01d61ac7a0ac9e541024be9d452121c5761",
+      "trust": "exact immutable publisher .deb; prefer dependency-closed artifact for uniform offline installation"
+    },
+    {
+      "category": "vscode-provenance-only",
+      "name": "vscode-stable-amd64-microsoft-apt-verified",
+      "artifact_id": 9169606145,
+      "run_id": 31670790436,
+      "size_bytes": 239384891,
+      "actions_artifact_digest": "sha256:8268db59ab6ae1adedb6e87e16a1ec7f20f4fa6190d38ffd394cb0cd9dff0367",
+      "expires_at": "2026-11-11T05:34:39Z",
+      "trust": "exact Microsoft .deb matched signed Microsoft APT metadata; prefer dependency-closed artifact for offline installation"
+    }
+  ]
+}
