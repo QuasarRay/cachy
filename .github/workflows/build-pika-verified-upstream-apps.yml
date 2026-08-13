@@ -1,0 +1,250 @@
+name: Build publisher-verified PikaOS application artifacts
+
+on:
+  push:
+    branches: [agent/pika-offline-artifacts]
+    paths:
+      - '.github/workflows/build-pika-verified-upstream-apps.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windscribe:
+    name: Windscribe 2.23.12 publisher bytes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fetch release metadata and exact Debian assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/evidence
+          curl -fL --retry 5 https://api.github.com/repos/Windscribe/Desktop-App/releases/tags/v2.23.12 -o out/evidence/release.json
+          for asset_name in windscribe_2.23.12_amd64.deb windscribe-cli_2.23.12_amd64.deb; do
+            jq --arg n "$asset_name" -e '.assets[] | select(.name == $n)' out/evidence/release.json > "out/evidence/${asset_name}.asset.json"
+            url=$(jq -r '.browser_download_url' "out/evidence/${asset_name}.asset.json")
+            digest=$(jq -r '.digest' "out/evidence/${asset_name}.asset.json")
+            size=$(jq -r '.size' "out/evidence/${asset_name}.asset.json")
+            test "${digest#sha256:}" != "$digest"
+            curl -fL --retry 5 "$url" -o "out/$asset_name"
+            actual=$(sha256sum "out/$asset_name" | cut -d' ' -f1)
+            test "$actual" = "${digest#sha256:}"
+            test "$(stat -c %s "out/$asset_name")" = "$size"
+            # Windscribe publishes the same installer hashes visibly in the release body.
+            jq -r '.body' out/evidence/release.json | grep -Fqi "$actual"
+            printf '%s  %s\n' "$actual" "$asset_name" >> out/SHA256SUMS
+          done
+          {
+            echo 'PASS: both exact amd64 Debian packages match GitHub publisher asset digests.'
+            echo 'PASS: both hashes are also explicitly published in the Windscribe release notes.'
+          } | tee out/evidence/VERIFICATION.txt
+
+      - name: Upload untouched verified Windscribe packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: windscribe-2.23.12-amd64-debs-publisher-verified
+          path: out/
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
+
+  sing-box:
+    name: sing-box 1.13.18 publisher bytes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fetch exact immutable Debian release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/evidence
+          curl -fL --retry 5 https://api.github.com/repos/SagerNet/sing-box/releases/tags/v1.13.18 -o out/evidence/release.json
+          jq -e '.immutable == true' out/evidence/release.json >/dev/null
+          asset_name='sing-box_1.13.18_linux_amd64.deb'
+          jq --arg n "$asset_name" -e '.assets[] | select(.name == $n)' out/evidence/release.json > out/evidence/asset.json
+          url=$(jq -r '.browser_download_url' out/evidence/asset.json)
+          digest=$(jq -r '.digest' out/evidence/asset.json)
+          size=$(jq -r '.size' out/evidence/asset.json)
+          test "${digest#sha256:}" != "$digest"
+          curl -fL --retry 5 "$url" -o "out/$asset_name"
+          actual=$(sha256sum "out/$asset_name" | cut -d' ' -f1)
+          test "$actual" = "${digest#sha256:}"
+          test "$(stat -c %s "out/$asset_name")" = "$size"
+          printf '%s  %s\n' "$actual" "$asset_name" > out/SHA256SUMS
+          {
+            echo "publisher_sha256=${digest#sha256:}"
+            echo "computed_sha256=$actual"
+            echo "publisher_size=$size"
+            echo "computed_size=$(stat -c %s "out/$asset_name")"
+            echo 'release_immutable=true'
+            echo 'status=PASS'
+          } > out/evidence/VERIFICATION.txt
+
+      - name: Upload untouched verified sing-box package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-1.13.18-linux-amd64-deb-publisher-verified
+          path: out/
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
+
+  xray:
+    name: Xray 26.3.27 publisher bytes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Verify exact Linux x64 ZIP against two publisher records
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/evidence
+          curl -fL --retry 5 https://api.github.com/repos/XTLS/Xray-core/releases/tags/v26.3.27 -o out/evidence/release.json
+          for asset_name in Xray-linux-64.zip Xray-linux-64.zip.dgst; do
+            jq --arg n "$asset_name" -e '.assets[] | select(.name == $n)' out/evidence/release.json > "out/evidence/${asset_name}.asset.json"
+            url=$(jq -r '.browser_download_url' "out/evidence/${asset_name}.asset.json")
+            digest=$(jq -r '.digest' "out/evidence/${asset_name}.asset.json")
+            size=$(jq -r '.size' "out/evidence/${asset_name}.asset.json")
+            test "${digest#sha256:}" != "$digest"
+            curl -fL --retry 5 "$url" -o "out/$asset_name"
+            actual=$(sha256sum "out/$asset_name" | cut -d' ' -f1)
+            test "$actual" = "${digest#sha256:}"
+            test "$(stat -c %s "out/$asset_name")" = "$size"
+          done
+
+          zip_sha=$(sha256sum out/Xray-linux-64.zip | cut -d' ' -f1)
+          # The upstream .dgst file contains multiple digest algorithms; require its SHA2-256 value too.
+          dgst_sha=$(awk -F'= ' '/SHA2-256=/{gsub(/[[:space:]]/, "", $2); print tolower($2); exit}' out/Xray-linux-64.zip.dgst)
+          test -n "$dgst_sha"
+          test "$zip_sha" = "$dgst_sha"
+          github_sha=$(jq -r '.digest' out/evidence/Xray-linux-64.zip.asset.json | sed 's/^sha256://')
+          test "$zip_sha" = "$github_sha"
+          printf '%s  Xray-linux-64.zip\n' "$zip_sha" > out/SHA256SUMS
+          {
+            echo "github_publisher_sha256=$github_sha"
+            echo "xray_dgst_sha256=$dgst_sha"
+            echo "computed_sha256=$zip_sha"
+            echo 'status=PASS'
+          } > out/evidence/VERIFICATION.txt
+
+      - name: Upload untouched verified Xray payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: xray-26.3.27-linux-64-publisher-verified
+          path: out/
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
+
+  tor-browser:
+    name: Tor Browser 15.0.19 signed publisher bytes
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Download exact Tor Browser archive and detached signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/evidence out/gnupg
+          chmod 700 out/gnupg
+          base='https://dist.torproject.org/torbrowser/15.0.19'
+          archive='tor-browser-linux-x86_64-15.0.19.tar.xz'
+          curl -fL --retry 5 "$base/$archive" -o "out/$archive"
+          curl -fL --retry 5 "$base/$archive.asc" -o "out/$archive.asc"
+
+      - name: Require Tor Browser Developers signing identity and valid signature
+        shell: bash
+        env:
+          GNUPGHOME: ${{ github.workspace }}/out/gnupg
+        run: |
+          set -euo pipefail
+          expected='EF6E286DDA85EA2A4BA7DE684E2C6E8793298290'
+          gpg --batch --auto-key-locate nodefault,wkd --locate-keys torbrowser@torproject.org
+          gpg --batch --with-colons --fingerprint torbrowser@torproject.org > out/evidence/key.txt
+          grep -Fq "fpr:::::::::${expected}:" out/evidence/key.txt
+          archive='tor-browser-linux-x86_64-15.0.19.tar.xz'
+          gpg --batch --status-fd 1 --verify "out/$archive.asc" "out/$archive" | tee out/evidence/gpg-status.txt
+          grep -Fq '[GNUPG:] VALIDSIG' out/evidence/gpg-status.txt
+          sha256sum "out/$archive" | tee out/SHA256SUMS
+          {
+            echo "signing_fingerprint=$expected"
+            echo "computed_sha256=$(sha256sum "out/$archive" | cut -d' ' -f1)"
+            echo 'detached_signature_verified=true'
+            echo 'status=PASS'
+          } > out/evidence/VERIFICATION.txt
+          rm -rf out/gnupg
+
+      - name: Upload untouched signed Tor Browser archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: tor-browser-15.0.19-linux-x86_64-signature-verified
+          path: out/
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
+
+  vscode:
+    name: VS Code stable signed Microsoft Debian package
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Configure official Microsoft VS Code repository with pinned signing key identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/evidence
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg
+          curl -fL --retry 5 https://packages.microsoft.com/keys/microsoft.asc -o out/evidence/microsoft.asc
+          gpg --batch --with-colons --show-keys --fingerprint out/evidence/microsoft.asc > out/evidence/microsoft-key.txt
+          expected='BC528686B50D79E339D3721CEB3E94ADBE1229CF'
+          grep -Fq "fpr:::::::::${expected}:" out/evidence/microsoft-key.txt
+          gpg --batch --dearmor < out/evidence/microsoft.asc | sudo tee /usr/share/keyrings/microsoft-vscode.gpg >/dev/null
+          cat <<'EOF' | sudo tee /etc/apt/sources.list.d/vscode.sources >/dev/null
+          Types: deb
+          URIs: https://packages.microsoft.com/repos/code
+          Suites: stable
+          Components: main
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/microsoft-vscode.gpg
+          EOF
+          sudo apt-get update
+          apt-cache policy code | tee out/evidence/apt-policy.txt
+
+      - name: Download exact stable code package and independently match authenticated APT SHA256
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(apt-cache policy code | awk '/Candidate:/{print $2; exit}')
+          test -n "$version"
+          test "$version" != '(none)'
+          mkdir -p out/package
+          cd out/package
+          apt-get download "code=$version"
+          deb=$(find . -maxdepth 1 -type f -name 'code_*.deb' -print -quit)
+          test -n "$deb"
+          actual=$(sha256sum "$deb" | cut -d' ' -f1)
+          metadata=$(apt-cache show "code=$version" | awk '/^SHA256:/{print $2; exit}')
+          filename=$(apt-cache show "code=$version" | awk '/^Filename:/{print $2; exit}')
+          test -n "$metadata"
+          test "$actual" = "$metadata"
+          printf '%s  %s\n' "$actual" "$(basename "$deb")" > ../SHA256SUMS
+          {
+            echo "version=$version"
+            echo "repository_filename=$filename"
+            echo "authenticated_apt_sha256=$metadata"
+            echo "computed_sha256=$actual"
+            echo 'microsoft_key_fingerprint=BC528686B50D79E339D3721CEB3E94ADBE1229CF'
+            echo 'status=PASS'
+          } > ../evidence/VERIFICATION.txt
+
+      - name: Upload exact authenticated Microsoft package
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-stable-amd64-microsoft-apt-verified
+          path: out/
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
