@@ -1,0 +1,49 @@
+name: NextKDE Git checkout artifact
+
+on:
+  push:
+    branches:
+      - artifact/nextkde-checkout-2026-11-24
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fetch exact upstream NextKDE commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir NextKde
+          git -C NextKde init --quiet
+          git -C NextKde remote add origin https://github.com/NextKde/NextKde.git
+          git -C NextKde fetch --depth=1 origin 47d7c65ca4e4005b7504cd2742d74614c9a95b3a
+          git -C NextKde checkout --quiet --detach FETCH_HEAD
+          test "$(git -C NextKde rev-parse HEAD)" = "47d7c65ca4e4005b7504cd2742d74614c9a95b3a"
+          test -z "$(git -C NextKde status --porcelain)"
+          git -C NextKde fsck --no-reflogs --connectivity-only
+
+      - name: ZIP with Git metadata, Unix file modes and symlinks
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip -q -r -y NextKDE-git-checkout-2026-11-24.zip NextKde
+          unzip -tq NextKDE-git-checkout-2026-11-24.zip
+          mkdir -p extracted
+          unzip -q NextKDE-git-checkout-2026-11-24.zip -d extracted
+          test -d extracted/NextKde/.git
+          test "$(git -C extracted/NextKde rev-parse HEAD)" = "47d7c65ca4e4005b7504cd2742d74614c9a95b3a"
+          test -z "$(git -C extracted/NextKde status --porcelain)"
+          sha256sum NextKDE-git-checkout-2026-11-24.zip
+
+      - name: Publish downloadable GitHub Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NextKDE-git-checkout-2026-11-24
+          path: NextKDE-git-checkout-2026-11-24.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
